@@ -27,9 +27,14 @@ jobs:
 
       - name: Fetch prebuilt native libraries
         shell: pwsh
-        run: ./scripts/fetch-native.ps1
+        run: |
+          ./scripts/fetch-native.ps1
+          # Test executables run from a per-unit build dir; Cargo only puts
+          # link-search dirs inside target/ on PATH, so add the DLLs here.
+          Add-Content $env:GITHUB_PATH "$PWD\native\transcribe\bin"
 
       - name: Test
+        timeout-minutes: 10
         run: cargo test --locked
 
       - name: Build release
