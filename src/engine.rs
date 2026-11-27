@@ -534,8 +534,11 @@ fn record_segments(session: &mut Session, run: &RunOptions, preview_cancel: &Can
 struct Pasted {
     at: Option<Instant>,
     blocked: bool,
-    /// Not pasted: shown as a copy card (no text field had focus).
+    /// Not pasted: shown as a copy card (no text field had focus, or no
+    /// app read the clipboard after Ctrl+V).
     carded: bool,
+    /// Ctrl+V was sent but nothing read the text.
+    unconfirmed: bool,
     waited_ms: f64,
     paste_ms: f64,
 }
@@ -548,7 +551,7 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
         // text on the clipboard instead.
         crate::clipboard::set_text(text)?;
         overlay::notice("Elevated window: text is on the clipboard (Ctrl+V)");
-        return Ok(Pasted { at: None, blocked: true, carded: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
+        return Ok(Pasted { at: None, blocked: true, carded: false, unconfirmed: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
     }
     if cfg.check_focus {
         let t = Instant::now();
@@ -557,15 +560,53 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
         if let crate::input::Target::NotEditable(_) = target {
             // Ctrl+V would go nowhere: keep the text one click away instead.
             overlay::card(text);
-            return Ok(Pasted { at: None, blocked: false, carded: true, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
+            return Ok(Pasted { at: None, blocked: false, carded: true, unconfirmed: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
         }
     }
     let saved = crate::clipboard::save().map_err(|e| log::warn!("clipboard save: {e}")).ok();
-    let seq = crate::clipboard::set_text(text)?;
+    let Some(seq) = crate::clipboard::set_text_deferred(text)? else {
+        // No owner window (should not happen): the old fixed-delay paste.
+        let seq = crate::clipboard::set_text(text)?;
+        std::thread::sleep(Duration::from_millis(cfg.paste_delay_before_ms));
+        crate::input::ctrl_v()?;
+        let at = Instant::now();
+        std::thread::sleep(Duration::from_millis(cfg.paste_delay_after_ms));
+        restore(saved, seq);
+        return Ok(Pasted { at: Some(at), blocked: false, carded: false, unconfirmed: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
+    };
     std::thread::sleep(Duration::from_millis(cfg.paste_delay_before_ms));
+    let refused = crate::clipboard::arm();
+    if !refused.is_empty() {
+        let names: Vec<String> = refused.iter().map(|&p| process_name(p)).collect();
+        log::debug!("clipboard monitors refused before Ctrl+V: {}", names.join(", "));
+    }
+    let sent = Instant::now();
     crate::input::ctrl_v()?;
-    let at = Instant::now();
-    std::thread::sleep(Duration::from_millis(cfg.paste_delay_after_ms));
+    match crate::clipboard::wait_read(sent, Duration::from_millis(PASTE_CONFIRM_MS)) {
+        Some(r) => {
+            log::info!("paste read by {} {:.1} ms after Ctrl+V", process_name(r.pid), ms(r.at - sent));
+            std::thread::sleep(Duration::from_millis(cfg.paste_delay_after_ms));
+            restore(saved, seq);
+            Ok(Pasted { at: Some(r.at), blocked: false, carded: false, unconfirmed: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
+        }
+        None => {
+            // Nothing took the text. Keep it on the clipboard (a late Ctrl+V
+            // still pastes it) and show it with a Copy button.
+            let refused: Vec<String> = crate::clipboard::take_refused().iter().map(|&p| process_name(p)).collect();
+            log::warn!(
+                "paste not confirmed: no app read the clipboard within {PASTE_CONFIRM_MS} ms of Ctrl+V (refused as monitors: {refused:?})"
+            );
+            overlay::card(text);
+            Ok(Pasted { at: None, blocked: false, carded: true, unconfirmed: true, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
+        }
+    }
+}
+
+/// How long the target app gets to read the clipboard after Ctrl+V before
+/// the paste counts as lost.
+const PASTE_CONFIRM_MS: u64 = 1000;
+
+fn restore(saved: Option<crate::clipboard::Saved>, seq: u32) {
     if let Some(saved) = saved {
         match crate::clipboard::restore(saved, seq) {
             Ok(false) => log::info!("clipboard changed during paste; not restored"),
@@ -573,7 +614,13 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
             Ok(true) => {}
         }
     }
-    Ok(Pasted { at: Some(at), blocked: false, carded: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
+}
+
+fn process_name(pid: u32) -> String {
+    if pid == 0 {
+        return "an unknown process".into();
+    }
+    crate::input::process_name(pid).unwrap_or_else(|| format!("pid {pid}"))
 }
 
 impl Worker {
@@ -925,7 +972,7 @@ impl Worker {
                     rec.status = "blocked";
                 }
                 if p.carded {
-                    rec.status = "card";
+                    rec.status = if p.unconfirmed { "unconfirmed" } else { "card" };
                 }
                 if let Some(at) = p.at {
                     rec.set_pasted(at);

@@ -291,6 +291,9 @@ fn handle_command(id: usize, actions: &Actions) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
     let taskbar_created = *TASKBAR_CREATED.get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
+    if crate::clipboard::on_message(hwnd, msg, wparam.0 as u32) {
+        return LRESULT(0);
+    }
     unsafe {
         match msg {
             WM_TRAY => {

@@ -169,6 +169,93 @@ fn bench_cleanup(text: &str, id: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks delayed-rendering paste confirmation without keystrokes: a reader
+/// thread plays the target app. The user's clipboard is saved and restored.
+fn clipboard_test() -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::w;
+
+    unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        if crate::clipboard::on_message(h, m, wp.0 as u32) {
+            return LRESULT(0);
+        }
+        unsafe { DefWindowProcW(h, m, wp, lp) }
+    }
+    std::thread::spawn(|| unsafe {
+        let class = WNDCLASSW { lpfnWndProc: Some(proc), lpszClassName: w!("chatty_cliptest"), ..Default::default() };
+        RegisterClassW(&class);
+        let h = CreateWindowExW(Default::default(), w!("chatty_cliptest"), w!(""), WS_POPUP, 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None)
+            .expect("window");
+        crate::clipboard::OWNER.store(h.0 as isize, Ordering::Relaxed);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            DispatchMessageW(&msg);
+        }
+    });
+    while crate::clipboard::OWNER.load(Ordering::Relaxed) == 0 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let saved = crate::clipboard::save()?;
+    println!("saved {} clipboard formats", saved_len(&saved));
+
+    let read_foreign = || unsafe {
+        OpenClipboard(None).map_err(|e| e.to_string())?;
+        let text = GetClipboardData(13).ok().map(|h| {
+            let p = GlobalLock(windows::Win32::Foundation::HGLOBAL(h.0)) as *const u16;
+            let n = (0..).take_while(|&i| *p.add(i) != 0).count();
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(h.0));
+            s
+        });
+        let _ = CloseClipboard();
+        Ok::<_, String>(text)
+    };
+
+    // 1. A reader 80 ms after "Ctrl+V": confirmed, with the right text.
+    let text = "chatty clipboard test äöü 👍";
+    crate::clipboard::set_text_deferred(text)?.ok_or("no owner")?;
+    std::thread::sleep(Duration::from_millis(60));
+    println!("   refused before arm: {:?}", crate::clipboard::arm());
+    let sent = Instant::now();
+    let reader = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        read_foreign()
+    });
+    let r = crate::clipboard::wait_read(sent, Duration::from_millis(1000));
+    let got = reader.join().unwrap()?;
+    println!("1. read: {:?} after {:?}, text matches: {}", r.map(|r| r.pid), r.map(|r| r.at - sent), got.as_deref() == Some(text));
+    if r.is_none() || got.as_deref() != Some(text) {
+        return Err("delayed rendering read not observed".into());
+    }
+
+    // 2. Nobody reads: unconfirmed after the timeout.
+    let seq = crate::clipboard::set_text_deferred(text)?.ok_or("no owner")?;
+    std::thread::sleep(Duration::from_millis(60));
+    println!("   refused before arm: {:?}", crate::clipboard::arm());
+    let t = Instant::now();
+    let r = crate::clipboard::wait_read(t, Duration::from_millis(1500));
+    println!("2. no reader: {:?} after {:?}", r.map(|r| r.pid), t.elapsed());
+    if r.is_some() {
+        return Err("read reported without a reader".into());
+    }
+    // 3. A late reader still gets the text.
+    let late = read_foreign()?;
+    println!("3. late read text matches: {}", late.as_deref() == Some(text));
+
+    let ok = crate::clipboard::restore(saved, seq)?;
+    println!("restored: {ok}");
+    Ok(())
+}
+
+fn saved_len(s: &crate::clipboard::Saved) -> usize {
+    s.len()
+}
+
 pub fn main(args: &[String]) -> i32 {
     attach_console();
     let result = match args[0].as_str() {
@@ -201,6 +288,7 @@ pub fn main(args: &[String]) -> i32 {
             };
             crate::ui::run_standalone(cfg, page)
         }
+        "--clipboard-test" => clipboard_test(),
         "--bench" if args.len() >= 2 => bench_asr(&args[1], &args[2..]),
         "--bench-cleanup" if args.len() >= 2 => bench_cleanup(&args[1], args.get(2).map(String::as_str)),
         "--download" if args.len() >= 2 => {

@@ -203,17 +203,28 @@ fn foreground_process() -> Option<HANDLE> {
 /// Executable name of the foreground window's process ("Code.exe").
 pub fn foreground_app() -> String {
     let Some(process) = foreground_process() else { return String::new() };
+    image_name(process).unwrap_or_default()
+}
+
+/// Executable name of a process id.
+pub fn process_name(pid: u32) -> Option<String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    image_name(process)
+}
+
+/// Executable name of `process`; closes the handle.
+fn image_name(process: HANDLE) -> Option<String> {
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
     let name = unsafe {
         let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
         let _ = CloseHandle(process);
         if !ok {
-            return String::new();
+            return None;
         }
         String::from_utf16_lossy(&buf[..len as usize])
     };
-    name.rsplit('\\').next().unwrap_or("").to_string()
+    Some(name.rsplit('\\').next().unwrap_or("").to_string())
 }
 
 fn is_elevated(process: HANDLE) -> Option<bool> {

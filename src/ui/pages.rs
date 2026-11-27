@@ -296,6 +296,7 @@ fn status_badge(status: &str) -> (Option<&'static str>, Color) {
         "cancelled" => (Some("Cancelled"), theme::AMBER),
         "blocked" => (Some("Clipboard only"), theme::AMBER),
         "card" => (Some("No text field"), theme::BLUE),
+        "unconfirmed" => (Some("Not pasted"), theme::BLUE),
         _ => (Some("Error"), theme::RED),
     }
 }
