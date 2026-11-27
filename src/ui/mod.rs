@@ -211,6 +211,9 @@ pub enum Action {
     DeleteModel(&'static crate::models::Asset),
     ReloadStats,
     ListDevices,
+    /// Download and install the available release.
+    Update,
+    CheckUpdates,
 }
 
 pub fn id(s: &str) -> u64 {
@@ -793,6 +796,8 @@ fn sidebar(ui: &mut Ui, current: Page, h: f32, nav_to: &mut Option<Page>) {
         y += 42.0;
     }
 
+    update_button(ui, Rect::new(12.0, h - 154.0, SIDEBAR_W - 24.0, 38.0));
+
     // Footer card: model, backend, microphone.
     let cfg = ctx().cfg.get();
     let model = crate::models::asr(&cfg.model).map_or(cfg.model.as_str(), |m| m.id);
@@ -809,6 +814,31 @@ fn sidebar(ui: &mut Ui, current: Page, h: f32, nav_to: &mut Option<Page>) {
     };
     ui.icon(icon::MIC, Rect::new(card.x + 12.0, card.y + 54.0, 16.0, 26.0), 11.0, theme::TEXT3);
     ui.g.label(&line, Font::text(11.5), Rect::new(card.x + 30.0, card.y + 54.0, card.w - 44.0, 26.0), theme::TEXT3, Align::Left);
+}
+
+/// Above the footer card while a release is available or installing.
+fn update_button(ui: &mut Ui, r: Rect) {
+    use crate::update::State;
+    match crate::update::state() {
+        State::Available(rel) => {
+            if ui.button("update", &format!("Update to {}", rel.version), Some(icon::DOWNLOAD), Kind::Primary, r) {
+                ui.actions.push(Action::Update);
+            }
+        }
+        State::Installing(rel, f) => {
+            ui.g.fill(r, 8.0, theme::CONTROL);
+            ui.g.stroke(r, 8.0, Color::white(0.07), 1.0);
+            let text = if f < 1.0 { format!("Downloading {}  {:.0}%", rel.version, f * 100.0) } else { format!("Installing {}", rel.version) };
+            ui.g.label(&text, Font::semibold(12.5), Rect::new(r.x + 14.0, r.y, r.w - 28.0, r.h - 4.0), theme::TEXT, Align::Left);
+            ui.progress(Rect::new(r.x + 14.0, r.bottom() - 9.0, r.w - 28.0, 3.0), f, theme::ACCENT);
+        }
+        State::Failed(rel, _) => {
+            if ui.button("update", &format!("Retry update to {}", rel.version), Some(icon::REFRESH), Kind::Secondary, r) {
+                ui.actions.push(Action::Update);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn phase_style(p: crate::status::Phase) -> (Color, &'static str) {
@@ -947,6 +977,8 @@ fn run_actions(actions: Vec<Action>) {
                 let refs: Vec<(&str, toml_edit::Value)> = values.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
                 ctx().cfg.set(&refs);
             }
+            Action::Update => crate::update::install(),
+            Action::CheckUpdates => crate::update::check_now(),
             Action::Open(p) => unsafe {
                 ShellExecuteW(None, w!("open"), &HSTRING::from(p.as_os_str()), None, None, SW_SHOWNORMAL);
             },

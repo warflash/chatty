@@ -315,7 +315,7 @@ pub fn delete(asset: &Asset) -> std::io::Result<()> {
     }
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     use ureq::tls::{TlsConfig, TlsProvider};
     ureq::Agent::config_builder()
         .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).build())

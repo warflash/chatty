@@ -124,8 +124,31 @@ src/stats_ui.rs     statistics window (GDI)
 src/sqlite.rs       winsqlite3 FFI
 src/overlay.rs      click-through overlay
 src/tray.rs         tray icon and menu
+src/update.rs       update check and self-update from GitHub releases
 src/clipboard.rs, input.rs, config.rs, paths.rs, logger.rs, wav.rs, bench.rs
 ```
+
+## Releases and updates
+
+To release: bump `version` in Cargo.toml, commit, tag `vX.Y.Z` and push
+the tag. CI checks that the tag matches Cargo.toml, then publishes a
+GitHub release with `chatty-X.Y.Z-windows-x64.zip` and its `.sha256`. A tag
+with a suffix (`v0.3.0-beta.1`) becomes a pre-release, which only the beta
+channel sees.
+
+The app (`update_channel`: stable, beta or off) asks the GitHub API at
+startup and every six hours. A newer release puts an "Update to X.Y.Z"
+button in the sidebar. Installing downloads the zip to
+`%LOCALAPPDATA%\chatty\update`, checks the SHA-256, unpacks it with
+Windows' `tar.exe` and copies it over the install folder. Files in use
+(chatty.exe, the DLLs) are renamed to `*.old` first, which Windows allows
+while they run; a failed copy puts everything back. The new exe starts
+with `CHATTY_UPDATED_FROM` set, waits up to 30 s for the old process to
+release the single-instance mutex, and deletes the `*.old` files. Config
+and data live outside the install folder and are untouched.
+
+Debug builds and builds run from a `target` folder never update.
+`CHATTY_UPDATE_FEED=<url>` replaces the releases API URL for testing.
 
 ## Simplifications (noted, deliberate)
 

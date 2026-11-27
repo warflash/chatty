@@ -1125,7 +1125,52 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         }
         x -= 8.0;
     }
+    updates_row(ui, c, &cfg.update_channel);
     let _ = &st.loading;
+}
+
+/// Update channel, and what the last check found.
+fn updates_row(ui: &mut Ui, c: &mut Col, channel: &str) {
+    use crate::update::State;
+    let me = crate::update::current();
+    let state = crate::update::state();
+    let desc = match &state {
+        State::Disabled(why) => format!("chatty {me} · {why}"),
+        State::Off => format!("chatty {me} · not checking for updates"),
+        State::Checking => format!("chatty {me} · checking…"),
+        State::UpToDate => format!("chatty {me} · up to date"),
+        State::CheckFailed(e) => format!("chatty {me} · check failed: {e}"),
+        State::Available(r) => format!("chatty {me} · {} is available", r.version),
+        State::Installing(r, _) => format!("chatty {me} · installing {}", r.version),
+        State::Failed(r, e) => format!("Update to {} failed: {e}", r.version),
+    };
+    let r = row(ui, c, "Updates", &desc, 400.0);
+    let channels = ["stable", "beta", "off"];
+    let ci = channels.iter().position(|ch| *ch == channel).unwrap_or(0);
+    let seg = Rect::new(r.right() - 250.0, r.y, 250.0, r.h);
+    if let Some(i) = ui.segmented("set/update_channel", &["Stable", "Beta", "Off"], ci, seg) {
+        set(ui, "update_channel", channels[i]);
+    }
+    let (label, glyph) = match &state {
+        State::Available(_) | State::Failed(..) => ("Release notes", icon::OPEN),
+        _ => ("Check now", icon::REFRESH),
+    };
+    let checkable = !matches!(state, State::Disabled(_) | State::Off | State::Checking | State::Installing(..));
+    let bw = ui.button_width(label, true);
+    let br = Rect::new(seg.x - 8.0 - bw, r.y, bw, r.h);
+    match &state {
+        State::Available(rel) | State::Failed(rel, _) => {
+            if ui.button("set/update_check", label, Some(glyph), Kind::Secondary, br) {
+                ui.actions.push(Action::Open(std::path::PathBuf::from(&rel.page)));
+            }
+        }
+        _ if checkable => {
+            if ui.button("set/update_check", label, Some(glyph), Kind::Secondary, br) {
+                ui.actions.push(Action::CheckUpdates);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn ctx_path(i: usize) -> std::path::PathBuf {

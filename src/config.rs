@@ -140,6 +140,8 @@ pub struct Config {
     /// an installed family name, or a path to a .ttf / .otf file.
     pub font: String,
     pub overlay: bool,
+    /// Updates from GitHub releases: "stable", "beta" (pre-releases too) or "off".
+    pub update_channel: String,
 }
 
 impl Default for Config {
@@ -170,6 +172,7 @@ impl Default for Config {
             trailing_space: true,
             font: String::new(),
             overlay: true,
+            update_channel: "stable".into(),
         }
     }
 }
@@ -283,6 +286,8 @@ trailing_space = true
 # Font for the overlay and window: "" (Segoe UI Variable), an installed
 # family like "Inter", or a path to a .ttf file.
 font = ""
+# Updates from GitHub releases: "stable", "beta" (pre-releases too) or "off".
+update_channel = "stable"
 
 [filler_words]
 any = ["uh", "uhm", "uhh", "hmm", "mmm", "ehm"]

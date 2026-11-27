@@ -21,12 +21,13 @@ mod status;
 mod text;
 mod tray;
 mod ui;
+mod update;
 mod wav;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -144,17 +145,32 @@ fn main() {
         std::process::exit(code);
     }
 
+    // Started by an update: the old process is still shutting down.
+    let updated_from = std::env::var(update::RESTART_ENV).ok();
+    let deadline = Instant::now() + Duration::from_secs(30);
     unsafe {
-        let _mutex = CreateMutexW(None, true, w!("Local\\chatty-single-instance"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            log::info!("already running");
-            return;
+        loop {
+            let mutex = CreateMutexW(None, true, w!("Local\\chatty-single-instance"));
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                std::mem::forget(mutex);
+                break;
+            }
+            if updated_from.is_none() || Instant::now() > deadline {
+                log::info!("already running");
+                return;
+            }
+            if let Ok(h) = mutex {
+                let _ = CloseHandle(h);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        std::mem::forget(_mutex);
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let t0 = Instant::now();
     log::info!("chatty {} starting ({})", env!("CARGO_PKG_VERSION"), paths::exe_dir().display());
+    if let Some(v) = &updated_from {
+        log::info!("updated from {v}");
+    }
 
     let cfg_path = config::path();
     let cfg = config::Shared::new(cfg_path.clone(), config::load_or_create(&cfg_path));
@@ -200,6 +216,9 @@ fn main() {
             if old.mouse_button != new.mouse_button {
                 logi::set_enabled(new.mouse_button);
             }
+            if old.update_channel != new.update_channel {
+                update::check_now();
+            }
             engine.send(engine::Cmd::Config(std::sync::Arc::new(new.clone())));
             tray::set_tooltip("");
         });
@@ -212,6 +231,10 @@ fn main() {
     let main_hwnd = tray::create(instance, tray::Actions { cfg: cfg.clone() });
     clipboard::OWNER.store(main_hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
     engine.send(engine::Cmd::Warm);
+    update::start(cfg.clone());
+    if updated_from.is_some() {
+        overlay::notice(&format!("Updated to {}", env!("CARGO_PKG_VERSION")));
+    }
     log::info!("ready in {:?}", t0.elapsed());
 
     unsafe {
