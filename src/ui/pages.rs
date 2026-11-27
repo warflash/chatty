@@ -999,7 +999,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         options.push(cfg.microphone.clone());
     }
     let selected = if cfg.microphone.is_empty() { 0 } else { options.iter().position(|o| o == &cfg.microphone).unwrap_or(0) };
-    if let Some(i) = ui.select("set/mic", &options, selected, r) {
+    if let Some(i) = ui.select("set/mic", &options, selected, true, r) {
         set(ui, "microphone", if i == 0 { String::new() } else { options[i].clone() });
     }
     stepper_row(
@@ -1031,7 +1031,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
     let fonts = font_options(&cfg.font);
     let labels: Vec<String> = fonts.iter().map(|(l, _)| l.clone()).collect();
     let selected = fonts.iter().position(|(_, v)| v == &cfg.font).unwrap_or(0);
-    if let Some(i) = ui.select("set/font", &labels, selected, r) {
+    if let Some(i) = ui.select("set/font", &labels, selected, true, r) {
         set(ui, "font", fonts[i].1.clone());
     }
     toggle_row(ui, c, "Press Enter after pasting", "Sends the message right away", "auto_enter", cfg.auto_enter);

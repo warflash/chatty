@@ -172,6 +172,21 @@ struct Popup {
     selected: usize,
     /// Scroll offset for long lists (DIPs); None until first drawn.
     scroll: Option<f32>,
+    /// Filter field for searchable lists.
+    search: Option<TextField>,
+    /// Keyboard highlight, an index into the filtered list.
+    hot: usize,
+}
+
+/// Option indices whose text contains every word of `query`, ignoring case.
+fn filter_options(options: &[String], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    (0..options.len())
+        .filter(|&i| {
+            let o = options[i].to_lowercase();
+            words.iter().all(|w| o.contains(w.as_str()))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -362,8 +377,9 @@ impl Ui<'_> {
         out
     }
 
-    /// Dropdown; the list opens over everything else.
-    pub fn select(&mut self, key: &str, options: &[String], selected: usize, r: Rect) -> Option<usize> {
+    /// Dropdown; the list opens over everything else. With `searchable` the list
+    /// opens with a filter field: typing narrows it, arrows and Enter pick.
+    pub fn select(&mut self, key: &str, options: &[String], selected: usize, searchable: bool, r: Rect) -> Option<usize> {
         let k = id(key);
         if let Some((cid, i)) = self.mem.chosen {
             if cid == k {
@@ -380,7 +396,15 @@ impl Ui<'_> {
         self.icon(icon::CHEVRON_DOWN, Rect::new(r.right() - 32.0, r.y, 24.0, r.h), 10.0, theme::TEXT2);
         if clicked {
             // The popup is drawn in screen coordinates at the end of the frame.
-            self.mem.popup = Some(Popup { id: k, anchor: r, options: options.to_vec(), selected, scroll: None });
+            self.mem.popup = Some(Popup {
+                id: k,
+                anchor: r,
+                options: options.to_vec(),
+                selected,
+                scroll: None,
+                search: searchable.then(TextField::default),
+                hot: selected,
+            });
         }
         None
     }
@@ -799,59 +823,120 @@ pub fn phase_style(p: crate::status::Phase) -> (Color, &'static str) {
 }
 
 fn popup(ui: &mut Ui, w: f32, h: f32) {
-    let Some(p) = ui.mem.popup.clone() else {
+    let Some(mut p) = ui.mem.popup.clone() else {
         ui.mem.popup_rect = None;
         return;
     };
     let row = 34.0;
-    let ph = (p.options.len() as f32 * row + 8.0).min(h - 40.0).min(420.0);
+    let head = if p.search.is_some() { 44.0 } else { 0.0 };
+    // Sized for the full list so the popup keeps its size while filtering.
+    let ph = (p.options.len() as f32 * row + 8.0 + head).min(h - 40.0).min(420.0 + head);
     let mut y = p.anchor.bottom() + 4.0;
     if y + ph > h - 8.0 {
         y = (p.anchor.y - ph - 4.0).max(8.0);
     }
     let r = Rect::new(p.anchor.x, y, p.anchor.w.max(220.0).min(w - p.anchor.x - 8.0), ph);
+    let outside = ui.input.pressed && !r.contains(ui.input.mouse);
     ui.g.shadow(r, 10.0, 0.22);
     ui.g.fill(r, 10.0, Color::rgb(32, 32, 38));
     ui.g.stroke(r, 10.0, Color::white(0.10), 1.0);
     ui.mem.popup_rect = Some(r);
-    // Long lists scroll; they open with the selection in view.
-    let max_scroll = (p.options.len() as f32 * row + 8.0 - ph).max(0.0);
-    let scroll = p.scroll.unwrap_or((p.selected as f32 * row - ph / 2.0 + row).max(0.0)).clamp(0.0, max_scroll);
-    if let Some(m) = ui.mem.popup.as_mut() {
-        m.scroll = Some(scroll);
-    }
-    ui.g.push_clip(r.inset(1.0, 4.0));
+    let list = Rect::new(r.x, r.y + head, r.w, r.h - head);
+
     let mut chosen = None;
-    for (i, o) in p.options.iter().enumerate() {
-        let rr = Rect::new(r.x + 4.0, r.y + 4.0 + i as f32 * row - scroll, r.w - 8.0, row - 2.0);
-        if rr.bottom() < r.y || rr.y > r.bottom() {
+    let mut close = outside;
+    let shown: Vec<usize> = match p.search.as_mut() {
+        None => (0..p.options.len()).collect(),
+        Some(field) => {
+            let before = field.text.clone();
+            let n = filter_options(&p.options, &field.text).len();
+            let mut moved = false;
+            for &k in &ui.input.keys {
+                match k {
+                    0x1B => close = true,
+                    0x26 => p.hot = p.hot.saturating_sub(1),
+                    0x28 => p.hot = (p.hot + 1).min(n.saturating_sub(1)),
+                    _ => continue,
+                }
+                moved = true;
+            }
+            if close {
+                Vec::new()
+            } else {
+                // The filter field owns the keyboard while the list is open.
+                ui.mem.focus = id("popup/search");
+                ui.focus_claimed = true;
+                let submit = ui.text_input("popup/search", field, "Search", Some(icon::SEARCH), Rect::new(r.x + 6.0, r.y + 6.0, r.w - 12.0, 32.0));
+                if field.text != before {
+                    p.hot = 0;
+                    p.scroll = Some(0.0);
+                }
+                let shown = filter_options(&p.options, &field.text);
+                p.hot = p.hot.min(shown.len().saturating_sub(1));
+                if submit && !shown.is_empty() {
+                    chosen = Some(shown[p.hot]);
+                }
+                if moved {
+                    // Keep the keyboard highlight in view.
+                    let view = list.h - 8.0;
+                    let top = p.hot as f32 * row;
+                    let s = p.scroll.unwrap_or(0.0);
+                    p.scroll = Some(if top < s { top } else if top + row > s + view { top + row - view } else { s });
+                }
+                shown
+            }
+        }
+    };
+    let searchable = p.search.is_some();
+
+    // Long lists scroll; they open with the selection in view.
+    let max_scroll = (shown.len() as f32 * row + 8.0 - list.h).max(0.0);
+    let scroll = p.scroll.unwrap_or((p.selected as f32 * row - list.h / 2.0 + row).max(0.0)).clamp(0.0, max_scroll);
+    p.scroll = Some(scroll);
+    if searchable {
+        ui.g.line(r.x + 1.0, list.y + 0.5, r.right() - 1.0, list.y + 0.5, Color::white(0.07), 1.0);
+        if shown.is_empty() {
+            ui.g.label("No match", Font::text(13.0), Rect::new(list.x + 18.0, list.y + 4.0, list.w - 24.0, row), theme::TEXT3, Align::Left);
+        }
+    }
+    ui.g.push_clip(list.inset(1.0, 4.0));
+    for (pos, &i) in shown.iter().enumerate() {
+        let rr = Rect::new(list.x + 4.0, list.y + 4.0 + pos as f32 * row - scroll, list.w - 8.0, row - 2.0);
+        if rr.bottom() < list.y || rr.y > list.bottom() {
             continue;
         }
         let (hover, _, clicked) = ui.interact(id(&format!("popup/{i}")), rr);
-        if hover || i == p.selected {
-            ui.g.fill(rr, 4.0, Color::white(if hover { 0.08 } else { 0.05 }));
+        let hot = searchable && pos == p.hot;
+        if hover || hot || i == p.selected {
+            ui.g.fill(rr, 4.0, Color::white(if hot { 0.09 } else if hover { 0.07 } else { 0.05 }));
         }
         if i == p.selected {
             ui.g.fill(Rect::new(rr.x, rr.y + 9.0, 3.0, rr.h - 18.0), 1.5, theme::ACCENT);
         }
-        ui.g.label(o, Font::text(13.0), Rect::new(rr.x + 14.0, rr.y, rr.w - 20.0, rr.h), theme::TEXT, Align::Left);
-        if clicked && r.contains(ui.input.mouse) {
+        ui.g.label(&p.options[i], Font::text(13.0), Rect::new(rr.x + 14.0, rr.y, rr.w - 20.0, rr.h), theme::TEXT, Align::Left);
+        if clicked && list.contains(ui.input.mouse) {
             chosen = Some(i);
         }
     }
     ui.g.pop_clip();
     if max_scroll > 0.0 {
-        let track = r.h - 16.0;
-        let thumb = (track * ph / (max_scroll + ph)).max(24.0);
-        let ty = r.y + 8.0 + (track - thumb) * (scroll / max_scroll);
+        let track = list.h - 16.0;
+        let thumb = (track * list.h / (max_scroll + list.h)).max(24.0);
+        let ty = list.y + 8.0 + (track - thumb) * (scroll / max_scroll);
         ui.g.fill(Rect::new(r.right() - 6.0, ty, 3.0, thumb), 1.5, Color::white(0.18));
     }
     if let Some(i) = chosen {
         ui.mem.chosen = Some((p.id, i));
         ui.mem.popup = None;
+        ui.mem.focus = 0;
         ui.animate = true; // one more frame delivers the choice
-    } else if ui.input.pressed && !r.contains(ui.input.mouse) {
+    } else if close {
         ui.mem.popup = None;
+        if !outside {
+            ui.mem.focus = 0; // Escape
+        }
+    } else {
+        ui.mem.popup = Some(p);
     }
 }
 
@@ -1247,4 +1332,18 @@ pub fn run_standalone(cfg: config::Shared, page: Page) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filter_options;
+
+    #[test]
+    fn filter_matches_every_word_ignoring_case() {
+        let o: Vec<String> = ["System default", "Microphone (USB Audio)", "Headset Microphone (Jabra)"].map(String::from).to_vec();
+        assert_eq!(filter_options(&o, ""), vec![0, 1, 2]);
+        assert_eq!(filter_options(&o, "mic"), vec![1, 2]);
+        assert_eq!(filter_options(&o, "usb MIC"), vec![1]);
+        assert!(filter_options(&o, "bluetooth").is_empty());
+    }
 }
