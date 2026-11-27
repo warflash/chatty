@@ -141,6 +141,11 @@ fn bench_cleanup(text: &str, id: Option<&str>) -> Result<(), String> {
 pub fn main(args: &[String]) -> i32 {
     attach_console();
     let result = match args[0].as_str() {
+        "--stats" => {
+            let path = crate::config::path();
+            let cfg = crate::config::Shared::new(path.clone(), crate::config::load_or_create(&path));
+            crate::stats_ui::run_standalone(cfg)
+        }
         "--bench" if args.len() >= 2 => bench_asr(&args[1], &args[2..]),
         "--bench-cleanup" if args.len() >= 2 => bench_cleanup(&args[1], args.get(2).map(String::as_str)),
         "--download" if args.len() >= 2 => {
@@ -150,7 +155,9 @@ pub fn main(args: &[String]) -> i32 {
                 None => Err(format!("unknown model {}", args[1])),
             }
         }
-        _ => Err("usage: chatty [--bench <wav> [model...] | --bench-cleanup <text> [model] | --download <model>]".into()),
+        _ => Err(
+            "usage: chatty [--stats | --bench <wav> [model...] | --bench-cleanup <text> [model] | --download <model>]".into(),
+        ),
     };
     match result {
         Ok(()) => 0,

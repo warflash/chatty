@@ -11,6 +11,21 @@ use crate::stats::{self, Report};
 
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 static OPENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `chatty --stats`: the window is the whole process; closing exits.
+static STANDALONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn run_standalone(cfg: config::Shared) -> Result<(), String> {
+    STANDALONE.store(true, std::sync::atomic::Ordering::Relaxed);
+    eframe::run_native(
+        "chatty-stats",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_title("chatty statistics").with_inner_size([1100.0, 800.0]),
+            ..Default::default()
+        },
+        Box::new(move |cc| Ok(Box::new(StatsApp::new(cfg, cc.egui_ctx.clone())))),
+    )
+    .map_err(|e| e.to_string())
+}
 
 pub fn open(cfg: config::Shared) {
     if let Some(ctx) = CTX.get() {
@@ -109,16 +124,24 @@ fn fmt_minutes(m: f64) -> String {
 }
 
 fn tile(ui: &mut egui::Ui, label: &str, value: String, sub: Option<String>) {
-    egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
-        ui.set_min_width(150.0);
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).small().weak());
-            ui.label(RichText::new(value).size(22.0).strong());
-            if let Some(s) = sub {
-                ui.label(RichText::new(s).small().weak());
-            }
+    // A fixed allocation lets horizontal_wrapped know the size up front.
+    ui.allocate_ui(Vec2::new(200.0, 78.0), |ui| {
+        egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
+            ui.set_width(178.0);
+            ui.set_height(56.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).small().weak());
+                ui.label(RichText::new(value).size(22.0).strong());
+                if let Some(s) = sub {
+                    ui.add(egui::Label::new(RichText::new(s).small().weak()).truncate());
+                }
+            });
         });
     });
+}
+
+fn days(n: i64) -> String {
+    if n == 1 { "1 day".into() } else { format!("{n} days") }
 }
 
 fn heatmap(ui: &mut egui::Ui, data: &[[i64; 24]]) {
@@ -191,7 +214,7 @@ fn show_report(ui: &mut egui::Ui, r: &Report) {
         tile(ui, "This week", fmt_int(r.words.week), Some(format!("{} dictations", r.dictations.week)));
         tile(ui, "This month", fmt_int(r.words.month), Some(format!("{} dictations", r.dictations.month)));
         tile(ui, "All time", fmt_int(r.words.all), Some(format!("{} dictations", r.dictations.all)));
-        tile(ui, "Streak", format!("{} days", r.streak_days), Some(format!("longest {} days", r.longest_streak)));
+        tile(ui, "Streak", days(r.streak_days), Some(format!("longest {}", days(r.longest_streak))));
         tile(
             ui,
             "Time saved",
@@ -200,12 +223,12 @@ fn show_report(ui: &mut egui::Ui, r: &Report) {
         );
         tile(ui, "Average WPM", format!("{:.0}", r.avg_wpm), Some(format!("{:.0} incl. pauses & latency", r.avg_wpm_total)));
         tile(ui, "Best WPM", format!("{:.0}", r.best_wpm), Some("≥ 3 s of speech".into()));
-        tile(ui, "Release → paste", format!("{:.0} ms", r.avg_latency), Some(format!("p95 {:.0} ms", r.p95_latency)));
+        tile(ui, "Release to paste", format!("{:.0} ms", r.avg_latency), Some(format!("p95 {:.0} ms", r.p95_latency)));
         tile(
             ui,
             "Enter taps",
             fmt_int(r.enter_taps),
-            Some(format!("{} today · {:.0} ms tap → Enter", r.enter_taps_today, r.enter_latency)),
+            Some(format!("{} today · {:.0} ms tap to Enter", r.enter_taps_today, r.enter_latency)),
         );
         tile(
             ui,
@@ -336,7 +359,7 @@ fn show_report(ui: &mut egui::Ui, r: &Report) {
 
 impl eframe::App for StatsApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
+        if !STANDALONE.load(std::sync::atomic::Ordering::Relaxed) && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.was_visible = false;
