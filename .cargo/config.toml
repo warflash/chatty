@@ -1,0 +1,4 @@
+# transcribe-cpp-sys links against the prebuilt install prefix that
+# scripts/fetch-native.ps1 assembles instead of compiling transcribe.cpp.
+[env]
+TRANSCRIBE_DIR = { value = "native/transcribe", relative = true }
