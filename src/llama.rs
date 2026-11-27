@@ -1,7 +1,12 @@
-//! Runtime binding to llama.cpp's prebuilt `llama.dll` (pinned build in
-//! scripts/fetch-native.ps1; struct layouts below mirror its `llama.h`).
+//! Runtime binding to llama.cpp's prebuilt `llama.dll` / `libllama.dylib`
+//! (pinned build in scripts/fetch-native.*; struct layouts below mirror its
+//! `llama.h`).
 //!
-//! llama.cpp ships its own `ggml.dll` / `ggml-base.dll`, a different ggml
+//! macOS: the dylibs carry versioned ggml names (`libggml.1.dylib`) and an
+//! `@loader_path` rpath, so `dlopen` by full path binds them to their own
+//! ggml with no further help.
+//!
+//! Windows: llama.cpp ships its own `ggml.dll` / `ggml-base.dll`, a different ggml
 //! build than transcribe.cpp's DLLs of the same names, which are already
 //! loaded. Windows would bind llama.dll's imports to those by module name.
 //! Loading it inside an activation context built from `llama.manifest`
@@ -11,11 +16,15 @@
 use std::ffi::{CString, c_char, c_void};
 use std::path::Path;
 
+#[cfg(windows)]
 use windows::Win32::Foundation::{HANDLE, HMODULE};
+#[cfg(windows)]
 use windows::Win32::System::ApplicationInstallationAndServicing::{
     ACTCTXW, ActivateActCtx, CreateActCtxW, DeactivateActCtx,
 };
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddress, LoadLibraryW};
+#[cfg(windows)]
 use windows::core::{HSTRING, PCSTR, PCWSTR};
 
 #[repr(C)]
@@ -103,6 +112,7 @@ struct ChainParams {
 
 type Ptr = *mut c_void;
 
+#[cfg(windows)]
 const ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID: u32 = 0x4;
 
 #[allow(clippy::type_complexity)]
@@ -131,12 +141,14 @@ struct Api {
     sampler_free: unsafe extern "C" fn(Ptr),
 }
 
+#[cfg(windows)]
 unsafe fn sym<T: Copy>(lib: HMODULE, name: &str) -> Result<T, String> {
     let c = CString::new(name).unwrap();
     let p = unsafe { GetProcAddress(lib, PCSTR(c.as_ptr() as *const u8)) }.ok_or_else(|| format!("llama.dll: no {name}"))?;
     Ok(unsafe { std::mem::transmute_copy(&p) })
 }
 
+#[cfg(windows)]
 fn module_path(m: HMODULE) -> String {
     let mut buf = [0u16; 512];
     let n = unsafe { GetModuleFileNameW(Some(m), &mut buf) } as usize;
@@ -148,8 +160,10 @@ unsafe extern "C" fn quiet_log(_level: i32, _text: *const c_char, _user: Ptr) {}
 static API: std::sync::OnceLock<Result<Api, String>> = std::sync::OnceLock::new();
 
 /// Activation context for `dir\llama.manifest`; active until dropped.
+#[cfg(windows)]
 struct ActCtx(usize);
 
+#[cfg(windows)]
 impl ActCtx {
     fn activate(dir: &Path) -> Result<ActCtx, String> {
         let manifest = HSTRING::from(dir.join("llama.manifest").as_os_str());
@@ -170,12 +184,59 @@ impl ActCtx {
     }
 }
 
+#[cfg(windows)]
 impl Drop for ActCtx {
     fn drop(&mut self) {
         let _ = unsafe { DeactivateActCtx(0, self.0) };
     }
 }
 
+#[cfg(windows)]
+fn backend_scope(dir: &Path) -> Result<ActCtx, String> {
+    ActCtx::activate(dir)
+}
+
+#[cfg(target_os = "macos")]
+fn backend_scope(_dir: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sym<T: Copy>(lib: *mut c_void, name: &str) -> Result<T, String> {
+    let c = CString::new(name).unwrap();
+    let p = unsafe { libc::dlsym(lib, c.as_ptr()) };
+    if p.is_null() {
+        return Err(format!("{}: no {name}", crate::paths::LLAMA_LIB));
+    }
+    Ok(unsafe { std::mem::transmute_copy(&p) })
+}
+
+#[cfg(target_os = "macos")]
+fn dlopen(path: &Path) -> Result<*mut c_void, String> {
+    let c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
+    let lib = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if lib.is_null() {
+        let err = unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) }.to_string_lossy().into_owned();
+        return Err(err);
+    }
+    Ok(lib)
+}
+
+#[cfg(target_os = "macos")]
+fn load_api() -> Result<Api, String> {
+    let dir = crate::paths::llama_dir();
+    let path = dir.join(crate::paths::LLAMA_LIB);
+    if !path.exists() {
+        return Err(format!("{} not found in {}", crate::paths::LLAMA_LIB, dir.display()));
+    }
+    let lib = dlopen(&path)?;
+    // Already loaded by libllama; this just returns its handle.
+    let ggml = dlopen(&dir.join("libggml.1.dylib"))?;
+    log::info!("llama.cpp loaded: {}", path.display());
+    unsafe { finish_api(lib, ggml, &dir) }
+}
+
+#[cfg(windows)]
 fn load_api() -> Result<Api, String> {
     let dir = crate::paths::llama_dir();
     if !dir.join("llama.dll").exists() {
@@ -191,6 +252,18 @@ fn load_api() -> Result<Api, String> {
         if !Path::new(&ggml_path).starts_with(&dir) {
             return Err(format!("llama.cpp bound to the wrong ggml: {ggml_path}"));
         }
+        finish_api(lib, ggml, &dir)
+    }
+}
+
+#[cfg(windows)]
+type Lib = HMODULE;
+#[cfg(target_os = "macos")]
+type Lib = *mut c_void;
+
+/// Resolves the entry points and initializes the backends.
+unsafe fn finish_api(lib: Lib, ggml: Lib, dir: &Path) -> Result<Api, String> {
+    unsafe {
         let api = Api {
             backend_init: sym(lib, "llama_backend_init")?,
             load_all_from_path: sym(ggml, "ggml_backend_load_all_from_path")?,
@@ -246,7 +319,7 @@ impl Llm {
         let api = api()?;
         let dir = crate::paths::llama_dir();
         // Backends load lazily during model load; keep the context active.
-        let _ctx = ActCtx::activate(&dir)?;
+        let _ctx = backend_scope(&dir)?;
         unsafe {
             let mut mp = (api.model_default_params)();
             mp.n_gpu_layers = gpu_layers;

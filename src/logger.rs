@@ -10,6 +10,17 @@ struct Logger {
     level: log::LevelFilter,
 }
 
+#[cfg(target_os = "macos")]
+fn timestamp() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let t = crate::platform::local_tm(now.as_millis() as i64);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second, now.subsec_millis()
+    )
+}
+
+#[cfg(windows)]
 fn timestamp() -> String {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     format!(

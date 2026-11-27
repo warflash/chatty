@@ -141,7 +141,7 @@ fn tiles(ui: &mut Ui, c: &mut Col, items: &[(&str, String, String, Option<Color>
 
 fn overview(ui: &mut Ui, c: &mut Col, st: &mut PageState, nav: &mut Option<Page>) {
     let cfg = cfg();
-    header(ui, c, "Overview", "Hold Ctrl + Numpad / to dictate into any window. A short tap presses Enter; Escape cancels.");
+    header(ui, c, "Overview", crate::platform::trigger_hint(&cfg.trigger));
     let s = status::get();
     let (color, word) = super::phase_style(s.phase);
 
@@ -1002,6 +1002,15 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
     if let Some(i) = ui.select("set/mic", &options, selected, r) {
         set(ui, "microphone", if i == 0 { String::new() } else { options[i].clone() });
     }
+    if cfg!(target_os = "macos") {
+        let r = row(ui, c, "Trigger", "What you hold to dictate", 300.0);
+        let triggers = ["ctrl+numpad_divide", "right_option", "right_command", "fn"];
+        let labels: Vec<String> = ["Control + keypad /", "Right Option", "Right Command", "fn (Globe)"].map(String::from).to_vec();
+        let ti = triggers.iter().position(|t| *t == cfg.trigger).unwrap_or(0);
+        if let Some(i) = ui.select("set/trigger", &labels, ti, r) {
+            set(ui, "trigger", triggers[i]);
+        }
+    }
     stepper_row(
         ui,
         c,
@@ -1027,7 +1036,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "check_focus",
         cfg.check_focus,
     );
-    let r = row(ui, c, "Font", r"Installed fonts, or .ttf files in %LOCALAPPDATA%\chatty\fonts", 320.0);
+    let r = row(ui, c, "Font", crate::platform::FONTS_HINT, 320.0);
     let fonts = font_options(&cfg.font);
     let labels: Vec<String> = fonts.iter().map(|(l, _)| l.clone()).collect();
     let selected = fonts.iter().position(|(_, v)| v == &cfg.font).unwrap_or(0);
@@ -1061,8 +1070,9 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
     }
 
     section(ui, c, "Speech engine");
-    let r = row(ui, c, "Compute", "GPU uses Vulkan; CPU works everywhere", 300.0);
-    let backs = ["auto", "vulkan", "cpu"];
+    let gpu_hint = format!("GPU uses {}; CPU works everywhere", crate::platform::GPU_NAME);
+    let r = row(ui, c, "Compute", &gpu_hint, 300.0);
+    let backs = ["auto", crate::platform::GPU_BACKEND, "cpu"];
     let bi = backs.iter().position(|b| *b == cfg.backend).unwrap_or(0);
     if let Some(i) = ui.segmented("set/backend", &["Auto", "GPU", "CPU"], bi, r) {
         set(ui, "backend", backs[i]);
@@ -1090,7 +1100,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
 
     section(ui, c, "Pasting");
     let delays: Vec<i64> = (0..=200).step_by(10).collect();
-    stepper_row(ui, c, "Delay before Ctrl+V", "Time for the clipboard to settle", "paste_delay_before_ms", cfg.paste_delay_before_ms as i64, format!("{} ms", cfg.paste_delay_before_ms), &delays);
+    stepper_row(ui, c, &format!("Delay before {}", crate::platform::PASTE_KEYS), "Time for the clipboard to settle", "paste_delay_before_ms", cfg.paste_delay_before_ms as i64, format!("{} ms", cfg.paste_delay_before_ms), &delays);
     stepper_row(ui, c, "Delay before restoring the clipboard", "Time for the app to read the text", "paste_delay_after_ms", cfg.paste_delay_after_ms as i64, format!("{} ms", cfg.paste_delay_after_ms), &delays);
 
     section(ui, c, "Cleanup");
@@ -1113,7 +1123,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
     stepper_row(ui, c, "Keep audio of recent dictations", "Playable from History", "history_size", cfg.history_size as i64, format!("{}", cfg.history_size), &[0, 5, 10, 20, 50, 100]);
 
     section(ui, c, "System");
-    toggle_row(ui, c, "Start with Windows", "Launch chatty when you sign in", "autostart", cfg.autostart);
+    toggle_row(ui, c, crate::platform::AUTOSTART_LABEL, "Launch chatty when you sign in", "autostart", cfg.autostart);
     let r = row(ui, c, "Files", "Configuration, log and data folder", 420.0);
     let labels = [("Config", icon::OPEN, ctx_path(0)), ("Log", icon::OPEN, ctx_path(1)), ("Data folder", icon::FOLDER, ctx_path(2))];
     let mut x = r.right();
@@ -1141,7 +1151,7 @@ fn ctx_path(i: usize) -> std::path::PathBuf {
 /// installed families, and the configured font if it is none of those.
 fn font_options(current: &str) -> Vec<(String, String)> {
     static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let mut out = vec![("Segoe UI Variable (default)".to_string(), String::new())];
+    let mut out = vec![(format!("{} (default)", crate::platform::DEFAULT_FONT), String::new())];
     for dir in [crate::paths::exe_dir().join("fonts"), crate::paths::local_dir().join("fonts")] {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         let mut files: Vec<_> = rd

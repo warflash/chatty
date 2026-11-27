@@ -97,6 +97,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
+/// The trigger is fixed on Windows (Ctrl+Numpad /); `trigger` in the config
+/// only applies on macOS.
+pub fn set_trigger(_spec: &str) {}
+
 /// Installs the hook on a dedicated thread that does nothing but pump
 /// messages, so a busy UI thread can never delay key handling.
 pub fn start(tx: Sender<KeyEvent>) {

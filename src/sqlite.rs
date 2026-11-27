@@ -1,10 +1,11 @@
-//! Minimal SQLite binding to Windows' own `winsqlite3.dll` (System32), so
-//! nothing is compiled and nothing extra ships. `raw-dylib` needs no import
-//! library.
+//! Minimal SQLite binding to the system's SQLite: Windows' own
+//! `winsqlite3.dll` (System32) or macOS's `libsqlite3.dylib`, so nothing is
+//! compiled and nothing extra ships. `raw-dylib` needs no import library.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
-#[link(name = "winsqlite3", kind = "raw-dylib")]
+#[cfg_attr(windows, link(name = "winsqlite3", kind = "raw-dylib"))]
+#[cfg_attr(target_os = "macos", link(name = "sqlite3"))]
 unsafe extern "system" {
     fn sqlite3_open_v2(filename: *const c_char, db: *mut *mut c_void, flags: c_int, vfs: *const c_char) -> c_int;
     fn sqlite3_close_v2(db: *mut c_void) -> c_int;
