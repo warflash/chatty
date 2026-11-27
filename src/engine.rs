@@ -145,11 +145,9 @@ impl Pump {
         let start = self.pcm.len();
         self.resampler.process(&self.raw, &mut self.pcm);
         if !flush && self.pcm.len() > start {
-            // Level meter for the overlay and window: RMS, roughly mapped
-            // so normal speech fills most of the range.
             let new = &self.pcm[start..];
             let rms = (new.iter().map(|s| s * s).sum::<f32>() / new.len() as f32).sqrt();
-            crate::status::set_level((rms * 6.0).sqrt().min(1.0));
+            crate::status::set_level(meter_level(rms, new.len() as f32 / audio::RATE as f32));
         }
         if flush {
             self.resampler.flush(&mut self.pcm);
@@ -345,6 +343,26 @@ fn record_streaming(session: &mut Session, spec: &AsrModel, run: &RunOptions, p:
         heard: Heard { text, language, final_ms, compute_ms: compute + final_ms },
         drained_at,
     })
+}
+
+/// Loudest recent level in dBFS, kept across recordings so the meter
+/// remembers the microphone. Stored as f32 bits.
+static METER_PEAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xC220_0000); // -40.0
+
+/// Level meter 0..1 on a dB scale relative to the loudest recent speech:
+/// the peak maps to 1, `RANGE` dB below it to 0. The peak follows louder
+/// input at once and falls back 1.5 dB/s, but never below -52 dBFS, so
+/// silence stays at 0 even on a quiet microphone.
+fn meter_level(rms: f32, secs: f32) -> f32 {
+    use std::sync::atomic::Ordering;
+    const RANGE: f32 = 26.0;
+    const FLOOR: f32 = -52.0;
+    const RELEASE_DB_PER_S: f32 = 1.5;
+    let db = 20.0 * rms.max(1e-6).log10();
+    let mut peak = f32::from_bits(METER_PEAK.load(Ordering::Relaxed));
+    peak = if db > peak { db } else { (peak - RELEASE_DB_PER_S * secs).max(FLOOR) };
+    METER_PEAK.store(peak.to_bits(), Ordering::Relaxed);
+    ((db - (peak - RANGE)) / RANGE).clamp(0.0, 1.0)
 }
 
 const VAD_FRAME: usize = 512;
