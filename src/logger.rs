@@ -81,5 +81,8 @@ pub fn init() {
     log::set_max_level(level);
     std::panic::set_hook(Box::new(|info| {
         log::error!("panic: {info}");
+        log::logger().flush();
+        // Also visible when run from a terminal (the command-line checks).
+        eprintln!("panic: {info}");
     }));
 }

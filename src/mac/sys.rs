@@ -6,6 +6,13 @@
 
 use std::ffi::{c_char, c_void};
 
+// AppKit and QuartzCore are only used through the Objective-C runtime, so
+// nothing would make the linker load them; NSFont, NSImage, NSApplication,
+// CATransaction ... would not exist.
+#[link(name = "AppKit", kind = "framework")]
+#[link(name = "QuartzCore", kind = "framework")]
+unsafe extern "C" {}
+
 pub type CFTypeRef = *const c_void;
 pub type CFStringRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;

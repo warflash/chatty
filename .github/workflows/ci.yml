@@ -101,6 +101,12 @@ jobs:
             ./target/release/chatty --render $p dist/previews/page-$p.png 1200 820 2
           done
 
+      - name: Crash backtrace
+        if: failure()
+        run: |
+          lldb --batch -o run -o "bt 40" -k "bt 40" -k quit -- ./target/release/chatty --overlay-test || true
+          tail -50 ~/Library/Application\ Support/chatty/chatty.log || true
+
       - name: Clipboard check
         continue-on-error: true
         run: ./target/release/chatty --clipboard-test
