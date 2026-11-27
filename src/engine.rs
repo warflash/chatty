@@ -315,7 +315,7 @@ fn record_streaming(session: &mut Session, spec: &AsrModel, run: &RunOptions, p:
             if update.result_changed {
                 let text = stream.text().display();
                 if text != shown {
-                    overlay::live(&text);
+                    overlay::live(&text, "");
                     shown = text;
                 }
             }
@@ -501,7 +501,7 @@ fn record_segments(session: &mut Session, run: &RunOptions, preview_cancel: &Can
         pump.pull(capture, vad.as_deref_mut(), false);
         let due = last_preview.elapsed() >= interval;
         if seg.step(session, run, &pump.pcm, &pump.vad_probs, thr, due) {
-            overlay::live(&seg.text());
+            overlay::live(&seg.committed.join(" "), &seg.current);
         }
         if due {
             last_preview = Instant::now();
@@ -823,7 +823,7 @@ impl Worker {
             Err(e) => return self.fail_start(&e),
         };
         let mic_ready = Instant::now();
-        overlay::live("");
+        overlay::live("", "");
         // Loads while the microphone already buffers into the ring.
         if let Err(e) = self.ensure_asr(&cfg) {
             self.audio.stop();

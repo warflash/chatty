@@ -57,9 +57,8 @@ enum Button {
 struct View {
     mode: Mode,
     live: String,
-    /// Card height (DIPs) while a recording is shown: never shrinks, so the
-    /// card does not jump as words wrap.
-    min_h: f32,
+    /// Bytes of `live` that are settled.
+    split: usize,
     /// Button rects in window pixels (card mode).
     copy_btn: RECT,
     close_btn: RECT,
@@ -69,7 +68,7 @@ struct View {
 const ZERO: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
 
 static VIEW: Mutex<View> =
-    Mutex::new(View { mode: Mode::Hidden, live: String::new(), min_h: 0.0, copy_btn: ZERO, close_btn: ZERO, hover: None });
+    Mutex::new(View { mode: Mode::Hidden, live: String::new(), split: 0, copy_btn: ZERO, close_btn: ZERO, hover: None });
 
 fn post() {
     let hwnd = HWND_RAW.load(Ordering::Relaxed);
@@ -94,11 +93,19 @@ fn set(mode: Mode) {
     post();
 }
 
-/// Recording; `text` is the live transcript so far.
-pub fn live(text: &str) {
-    let t = text.to_string();
+/// Recording: `settled` is text that won't change any more, `tail` the
+/// part still being re-transcribed (shown dimmer).
+pub fn live(settled: &str, tail: &str) {
+    let mut text = settled.to_string();
+    if !settled.is_empty() && !tail.is_empty() {
+        text.push(' ');
+    }
+    let split = text.len();
+    text.push_str(tail);
+    let t = text.clone();
     crate::status::update(|s| s.live = t);
-    set(Mode::Live(text.to_string()));
+    VIEW.lock().unwrap().split = if tail.is_empty() { text.len() } else { split };
+    set(Mode::Live(text));
 }
 
 pub fn transcribing() {
@@ -137,23 +144,24 @@ pub fn card(text: &str, reason: &str) {
 // ----------------------------------------------------------------- layout --
 
 /// Room around the card for the shadow (DIPs).
-const MARGIN: f32 = 28.0;
-const CARD_W: f32 = 640.0;
-const PAD_X: f32 = 18.0;
-const PAD_Y: f32 = 15.0;
-const LEAD_W: f32 = 26.0;
+const MARGIN: f32 = 40.0;
+const MAX_W: f32 = 640.0;
+const MIN_W: f32 = 340.0;
+const PAD_X: f32 = 14.0;
+const PAD_Y: f32 = 13.0;
+const BADGE: f32 = 34.0;
 const GAP: f32 = 12.0;
-const META_W: f32 = 44.0;
-const RADIUS: f32 = 18.0;
+const META_W: f32 = 40.0;
+const RADIUS: f32 = 22.0;
+const LINE_H: f32 = 23.0;
 const LIVE_LINES: u32 = 3;
 const CARD_LINES: u32 = 6;
 const FOOTER_H: f32 = 34.0;
 /// Card bottom above the work area's bottom edge (DIPs).
-const LIFT: f32 = 40.0;
-const FADE_IN: f32 = 0.16;
-const FADE_OUT: f32 = 0.14;
+const LIFT: f32 = 36.0;
+const FADE_IN: f32 = 0.18;
+const FADE_OUT: f32 = 0.16;
 
-const FILL: Color = Color(0.082, 0.082, 0.098, 0.97);
 const FONT: Font = Font::text(15.5);
 const META: Font = Font::text(12.5);
 
@@ -162,6 +170,8 @@ const META: Font = Font::text(12.5);
 struct Frame {
     mode: Mode,
     live: String,
+    /// Bytes of the live text that are settled; the rest may still change.
+    split: usize,
     level: f32,
     elapsed: f32,
     /// Seconds since the overlay appeared (animations).
@@ -169,102 +179,118 @@ struct Frame {
     hover: Option<Button>,
 }
 
+/// Card geometry in DIPs.
+#[derive(Clone, Copy, Debug, Default)]
+struct Geo {
+    w: f32,
+    h: f32,
+    /// Text wrap width.
+    tw: f32,
+    shown: u32,
+    total: u32,
+    /// How far the text is scrolled up (live text keeps its newest lines).
+    scroll: f32,
+}
+
 fn is_warning(s: &str) -> bool {
     let l = s.to_lowercase();
     ["fail", "unavailable", "error", "no microphone", "not found", "elevated"].iter().any(|k| l.contains(k))
 }
 
-fn body(f: &Frame) -> (String, Color) {
+/// (text, settled UTF-16 units, settled color, changing color)
+fn body(f: &Frame) -> (String, usize, Color, Color) {
+    let tentative = theme::TEXT.alpha(0.5);
+    let units = |s: &str| s.encode_utf16().count();
     match &f.mode {
-        Mode::Live(t) if t.trim().is_empty() => ("Listening…".into(), theme::TEXT3),
-        Mode::Live(t) => (t.trim().into(), theme::TEXT),
-        Mode::Transcribing if f.live.trim().is_empty() => ("Transcribing…".into(), theme::TEXT3),
-        Mode::Transcribing => (f.live.trim().into(), theme::TEXT2),
-        Mode::Notice(t) => (t.clone(), theme::TEXT),
-        Mode::Progress(t, _) => (t.clone(), theme::TEXT),
-        Mode::Card { text, .. } => (text.clone(), theme::TEXT),
-        Mode::Hidden => (String::new(), theme::TEXT),
+        Mode::Live(t) if t.trim().is_empty() => ("Listening…".into(), usize::MAX, theme::TEXT3, theme::TEXT3),
+        Mode::Live(t) => {
+            let split = f.split.min(t.len());
+            let lead = t.len() - t.trim_start().len();
+            (t.trim().to_string(), units(&t[lead.min(split)..split]), theme::TEXT, tentative)
+        }
+        Mode::Transcribing if f.live.trim().is_empty() => ("Transcribing…".into(), usize::MAX, theme::TEXT3, theme::TEXT3),
+        Mode::Transcribing => (f.live.trim().into(), usize::MAX, theme::TEXT2, theme::TEXT2),
+        Mode::Notice(t) | Mode::Progress(t, _) => (t.clone(), usize::MAX, theme::TEXT, theme::TEXT),
+        Mode::Card { text, .. } => (text.clone(), usize::MAX, theme::TEXT, theme::TEXT),
+        Mode::Hidden => (String::new(), usize::MAX, theme::TEXT, theme::TEXT),
     }
 }
 
-fn text_width(f: &Frame) -> f32 {
-    let meta = matches!(f.mode, Mode::Live(_) | Mode::Transcribing | Mode::Progress(..));
-    CARD_W - 2.0 * PAD_X - LEAD_W - GAP - if meta { META_W + 8.0 } else { 0.0 }
+fn has_meta(m: &Mode) -> bool {
+    // Transcribing keeps the timer's column so the text doesn't reflow.
+    matches!(m, Mode::Live(_) | Mode::Transcribing | Mode::Progress(..))
 }
 
-/// (card height, line height, lines shown, lines total) in DIPs.
-fn measure(g: &mut Gfx, f: &Frame) -> (f32, f32, u32, u32) {
-    let (s, _) = body(f);
-    let (_, lh) = g.wrapped("Ag", FONT, 1000.0);
-    let (lines, _) = g.wrapped(if s.is_empty() { "Ag" } else { &s }, FONT, text_width(f));
-    let max = if matches!(f.mode, Mode::Card { .. }) { CARD_LINES } else { LIVE_LINES };
-    let shown = lines.clamp(1, max);
-    let mut h = 2.0 * PAD_Y + shown as f32 * lh;
-    if matches!(f.mode, Mode::Card { .. }) {
-        h += 10.0 + FOOTER_H;
+/// Target geometry: the card hugs short text and wraps at `MAX_W`.
+fn layout(g: &mut Gfx, f: &Frame) -> Geo {
+    layout_at(g, f, 0.0)
+}
+
+/// `layout`, at least `min_w` wide.
+fn layout_at(g: &mut Gfx, f: &Frame, min_w: f32) -> Geo {
+    let (s, ..) = body(f);
+    let s = if s.is_empty() { " ".to_string() } else { s };
+    let card = matches!(f.mode, Mode::Card { .. });
+    let chrome = 2.0 * PAD_X + BADGE + GAP + if has_meta(&f.mode) { META_W + 8.0 } else { 6.0 };
+    let (one_line, _) = g.measure(&s, FONT, 10_000.0, false);
+    let w = if card { MAX_W } else { (one_line + chrome + 4.0).max(min_w).clamp(MIN_W, MAX_W) };
+    let tw = w - chrome;
+    let total = g.line_count(&s, FONT, tw, LINE_H);
+    let max = if card { CARD_LINES } else { LIVE_LINES };
+    let shown = total.min(max);
+    let mut h = (2.0 * PAD_Y + shown as f32 * LINE_H).max(2.0 * PAD_Y + BADGE - 6.0);
+    if card {
+        h += 8.0 + FOOTER_H;
     }
     if matches!(f.mode, Mode::Progress(..)) {
-        h += 12.0;
+        h += 10.0;
     }
-    (h, lh, shown, lines)
+    let scroll = if card { 0.0 } else { (total - shown) as f32 * LINE_H };
+    Geo { w, h, tw, shown, total, scroll }
 }
 
-/// Draws the card at (MARGIN, MARGIN). Returns the button rects (DIPs).
-fn draw(g: &mut Gfx, f: &Frame, card_h: f32, lh: f32, shown: u32, total: u32) -> Option<(Rect, Rect)> {
-    let card = Rect::new(MARGIN, MARGIN, CARD_W, card_h);
-    // Soft shadow: stacked translucent rounded rects.
-    for i in 0..10 {
-        let d = 1.0 + i as f32 * 1.7;
-        let r = Rect::new(card.x - d, card.y - d + 5.0, card.w + 2.0 * d, card.h + 2.0 * d);
-        g.fill(r, RADIUS + d, Color(0.0, 0.0, 0.0, 0.05 * (1.0 - i as f32 / 10.0)));
+/// Draws the card centered in the window. Returns the button rects (DIPs).
+fn draw(g: &mut Gfx, f: &Frame, geo: &Geo) -> Option<(Rect, Rect)> {
+    let card = Rect::new(MARGIN + (MAX_W - geo.w) / 2.0, MARGIN, geo.w, geo.h);
+    let radius = RADIUS.min(card.h / 2.0);
+    // Ambient and key shadows.
+    for i in 0..14 {
+        let d = 2.0 + i as f32 * 2.0;
+        let r = Rect::new(card.x - d, card.y - d + 10.0, card.w + 2.0 * d, card.h + 2.0 * d);
+        g.fill(r, radius + d, Color(0.0, 0.0, 0.0, 0.026 * (1.0 - i as f32 / 14.0)));
     }
-    g.fill(card, RADIUS, FILL);
-    // Hairline border.
-    g.stroke(card.inset(0.5, 0.5), RADIUS - 0.5, Color::white(0.085), 1.0);
+    g.fill(Rect::new(card.x, card.y + 1.5, card.w, card.h), radius, Color(0.0, 0.0, 0.0, 0.22));
+    // Body: a dark, slightly lifted surface with a light-catching edge.
+    g.gradient(card, radius, Color(0.115, 0.115, 0.135, 0.975), Color(0.071, 0.071, 0.086, 0.975));
+    g.stroke_vgradient(card.inset(0.5, 0.5), radius - 0.5, Color::white(0.16), Color::white(0.045), 1.0);
 
-    let x0 = card.x + PAD_X;
-    let ty = card.y + PAD_Y;
-    let cy = ty + lh / 2.0;
-    let lead_cx = x0 + LEAD_W / 2.0;
+    let card_mode = matches!(f.mode, Mode::Card { .. });
+    let text_top = card.y + PAD_Y;
+    let block_h = geo.shown as f32 * LINE_H;
+    let content_h = card.h - if card_mode { 8.0 + FOOTER_H } else { 0.0 } - if matches!(f.mode, Mode::Progress(..)) { 10.0 } else { 0.0 };
+    // The badge is centered on the text block (the first line on cards).
+    let cy = if card_mode { text_top + LINE_H / 2.0 } else { card.y + content_h / 2.0 };
+    let bx = card.x + PAD_X;
+    badge(g, f, bx + BADGE / 2.0, cy);
 
-    // Leading indicator.
-    match &f.mode {
-        Mode::Live(_) => level_meter(g, lead_cx, cy, f.level, f.t),
-        Mode::Transcribing => dots(g, lead_cx, cy, f.t),
-        Mode::Notice(t) => {
-            let (ic, c) = if is_warning(t) { (icon::WARNING, theme::AMBER) } else { ('\u{E946}', theme::BLUE) };
-            g.label(&ic.to_string(), Font::icon(15.0), Rect::new(x0, cy - 10.0, LEAD_W, 20.0), c, Align::Center);
-        }
-        Mode::Progress(..) => {
-            g.label(&icon::DOWNLOAD.to_string(), Font::icon(15.0), Rect::new(x0, cy - 10.0, LEAD_W, 20.0), theme::ACCENT, Align::Center)
-        }
-        Mode::Card { copied, .. } => {
-            let c = if *copied { theme::GREEN } else { theme::ACCENT };
-            g.glow(lead_cx, cy, 16.0, c.alpha(0.18));
-            g.label(&'\u{E77F}'.to_string(), Font::icon(15.0), Rect::new(x0, cy - 10.0, LEAD_W, 20.0), c, Align::Center);
-        }
-        Mode::Hidden => {}
-    }
-
-    // Body text: live text keeps the newest lines (scrolls up, top fades);
-    // cards keep the first lines (bottom fades).
-    let (s, color) = body(f);
-    let tx = x0 + LEAD_W + GAP;
-    let tw = text_width(f);
-    let visible = Rect::new(tx, ty, tw, shown as f32 * lh);
-    let is_card = matches!(f.mode, Mode::Card { .. });
-    let overflow = total > shown;
-    let fade = if overflow { lh * 0.9 } else { 0.0 };
-    let (top_fade, bottom_fade) = if is_card { (0.0, fade) } else { (fade, 0.0) };
-    g.push_fade(Rect::new(visible.x - 2.0, visible.y, visible.w + 4.0, visible.h + 2.0), top_fade, bottom_fade);
-    let y = if overflow && !is_card { ty - (total - shown) as f32 * lh } else { ty };
-    g.text(&s, FONT, Rect::new(tx, y, tw, total as f32 * lh + lh), color, true, Align::Left);
+    // Text: settled words bright, words that may still change dimmer.
+    // Live text keeps its newest lines (scrolls, top fades); cards keep the
+    // first lines (bottom fades).
+    let (s, split, c1, c2) = body(f);
+    let tx = bx + BADGE + GAP;
+    let ty = if card_mode { text_top } else { card.y + (content_h - block_h) / 2.0 };
+    let visible = Rect::new(tx - 2.0, ty, (card.right() - PAD_X - tx + 2.0).max(1.0), block_h);
+    let overflow = geo.total > geo.shown;
+    let fade = if overflow { LINE_H * 0.9 } else { 0.0 };
+    let (top_fade, bottom_fade) = if card_mode { (0.0, fade) } else { (fade.min(geo.scroll), 0.0) };
+    g.push_fade(Rect::new(visible.x, visible.y, visible.w, visible.h + 3.0), top_fade, bottom_fade);
+    g.text_two(&s, split, FONT, Rect::new(tx, ty - geo.scroll, geo.tw, geo.total as f32 * LINE_H + LINE_H), LINE_H, c1, c2);
     g.pop_fade();
 
-    // Right meta: recording time or percentage.
+    // Right meta: recording time or percentage, on the badge's line.
     let meta = Rect::new(card.right() - PAD_X - META_W, cy - 10.0, META_W, 20.0);
     match &f.mode {
-        Mode::Live(_) => {
+        Mode::Live(_) if f.elapsed >= 1.0 => {
             let secs = f.elapsed as u32;
             g.label(&format!("{}:{:02}", secs / 60, secs % 60), META, meta, theme::TEXT3, Align::Right);
         }
@@ -272,48 +298,79 @@ fn draw(g: &mut Gfx, f: &Frame, card_h: f32, lh: f32, shown: u32, total: u32) ->
         _ => {}
     }
 
-    // Bottom accents.
-    let track = Rect::new(card.x + RADIUS, card.bottom() - 2.5, card.w - 2.0 * RADIUS, 1.5);
-    match &f.mode {
-        Mode::Transcribing => shimmer(g, track, f.t),
-        Mode::Progress(_, p) => {
-            let bar = Rect::new(tx, ty + shown as f32 * lh + 8.0, tw + META_W + 8.0, 3.0);
-            g.fill(bar, 1.5, Color::white(0.08));
-            g.hgradient(Rect::new(bar.x, bar.y, (bar.w * p.clamp(0.0, 1.0)).max(3.0), bar.h), 1.5, theme::ACCENT, theme::ACCENT2);
-        }
-        _ => {}
+    if let Mode::Progress(_, p) = &f.mode {
+        let bar = Rect::new(tx, ty + block_h + 7.0, card.right() - PAD_X - tx, 3.0);
+        g.fill(bar, 1.5, Color::white(0.08));
+        g.hgradient(Rect::new(bar.x, bar.y, (bar.w * p.clamp(0.0, 1.0)).max(3.0), bar.h), 1.5, theme::ACCENT, theme::ACCENT2);
     }
 
     // Card footer: reason and buttons.
     if let Mode::Card { reason, copied, .. } = &f.mode {
-        let fy = card.bottom() - PAD_Y - FOOTER_H + 2.0;
+        let fy = card.bottom() - PAD_Y - FOOTER_H + 3.0;
         let close = Rect::new(card.right() - PAD_X - 32.0, fy, 32.0, 32.0);
         let copy = Rect::new(close.x - 8.0 - 98.0, fy, 98.0, 32.0);
         g.label(reason, META, Rect::new(tx, fy, copy.x - tx - 12.0, 32.0), theme::TEXT3, Align::Left);
         let hover_copy = f.hover == Some(Button::Copy);
         if *copied {
-            g.fill(copy, 16.0, theme::GREEN.alpha(0.16));
-            g.stroke(copy.inset(0.5, 0.5), 15.5, theme::GREEN.alpha(0.5), 1.0);
+            g.fill(copy, 16.0, theme::GREEN.alpha(0.14));
+            g.stroke(copy.inset(0.5, 0.5), 15.5, theme::GREEN.alpha(0.45), 1.0);
             button_label(g, copy, icon::CHECK, "Copied", theme::GREEN);
         } else {
-            let lift = if hover_copy { 0.08 } else { 0.0 };
-            g.glow(copy.x + copy.w / 2.0, copy.y + copy.h / 2.0, 60.0, theme::ACCENT.alpha(if hover_copy { 0.16 } else { 0.08 }));
-            g.gradient(copy, 16.0, theme::ACCENT.mix(Color::white(1.0), lift), theme::ACCENT2.mix(Color::white(1.0), lift));
-            g.stroke(copy.inset(0.5, 0.5), 15.5, Color::white(0.18), 1.0);
+            let lift = if hover_copy { 0.1 } else { 0.0 };
+            g.gradient(copy, 16.0, theme::ACCENT.mix(Color::white(1.0), lift), theme::ACCENT2.mix(Color::white(1.0), lift * 0.6));
+            g.stroke_vgradient(copy.inset(0.5, 0.5), 15.5, Color::white(0.32), Color::white(0.06), 1.0);
             button_label(g, copy, icon::COPY, "Copy", theme::ACCENT_TEXT);
         }
         let hover_close = f.hover == Some(Button::Close);
-        g.fill(close, 16.0, if hover_close { theme::CONTROL_HOVER } else { theme::CONTROL });
-        g.label(
-            &'\u{E711}'.to_string(),
-            Font::icon(11.0),
-            close,
-            if hover_close { theme::TEXT } else { theme::TEXT2 },
-            Align::Center,
-        );
+        g.fill(close, 16.0, if hover_close { Color::white(0.12) } else { Color::white(0.06) });
+        g.label(&'\u{E711}'.to_string(), Font::icon(10.5), close, if hover_close { theme::TEXT } else { theme::TEXT2 }, Align::Center);
         return Some((copy, close));
     }
     None
+}
+
+/// The round badge on the left: what the overlay is doing.
+fn badge(g: &mut Gfx, f: &Frame, cx: f32, cy: f32) {
+    let r = BADGE / 2.0;
+    let tint = |g: &mut Gfx, c: Color| {
+        g.circle(cx, cy, r, c.alpha(0.13));
+        g.ring(cx, cy, r - 0.5, c.alpha(0.22), 1.0);
+    };
+    let glyph = |g: &mut Gfx, ic: char, c: Color| {
+        g.label(&ic.to_string(), Font::icon(14.0), Rect::new(cx - r, cy - r, BADGE, BADGE), c, Align::Center);
+    };
+    match &f.mode {
+        Mode::Live(_) => {
+            // A halo that breathes with the voice, and the level bars.
+            let lv = f.level.clamp(0.0, 1.0);
+            g.glow(cx, cy, r + 10.0, theme::ACCENT.alpha(0.10 + 0.25 * lv));
+            g.circle(cx, cy, r, theme::ACCENT.alpha(0.14 + 0.06 * lv));
+            g.ring(cx, cy, r + 2.0 + 4.0 * lv, theme::ACCENT2.alpha(0.32 * lv), 1.25);
+            level_bars(g, cx, cy, lv, f.t);
+        }
+        Mode::Transcribing => {
+            tint(g, theme::ACCENT);
+            spinner(g, cx, cy, f.t);
+        }
+        Mode::Notice(t) if is_warning(t) => {
+            tint(g, theme::AMBER);
+            glyph(g, icon::WARNING, theme::AMBER);
+        }
+        Mode::Notice(_) => {
+            tint(g, theme::BLUE);
+            glyph(g, '\u{E946}', theme::BLUE);
+        }
+        Mode::Progress(..) => {
+            tint(g, theme::ACCENT);
+            glyph(g, icon::DOWNLOAD, theme::ACCENT);
+        }
+        Mode::Card { copied, .. } => {
+            let c = if *copied { theme::GREEN } else { theme::ACCENT };
+            tint(g, c);
+            glyph(g, if *copied { icon::CHECK } else { '\u{E77F}' }, c);
+        }
+        Mode::Hidden => {}
+    }
 }
 
 fn button_label(g: &mut Gfx, r: Rect, ic: char, label: &str, c: Color) {
@@ -325,43 +382,30 @@ fn button_label(g: &mut Gfx, r: Rect, ic: char, label: &str, c: Color) {
     g.label(label, font, Rect::new(x + 21.0, r.y, lw + 2.0, r.h), c, Align::Left);
 }
 
-/// Five rounded bars driven by the microphone level, with a gentle wave so
-/// they stay alive between syllables.
-fn level_meter(g: &mut Gfx, cx: f32, cy: f32, level: f32, t: f32) {
-    const SHAPE: [f32; 5] = [0.5, 0.78, 1.0, 0.78, 0.5];
-    let (bw, gap, max_h, min_h) = (3.0, 2.5, 18.0, 3.0);
-    let total = 5.0 * bw + 4.0 * gap;
-    g.glow(cx, cy, 20.0, theme::ACCENT.alpha(0.10 + 0.22 * level));
+/// Five rounded bars, exactly centered on (cx, cy), driven by the
+/// microphone level with a gentle wave so they stay alive between words.
+fn level_bars(g: &mut Gfx, cx: f32, cy: f32, level: f32, t: f32) {
+    const SHAPE: [f32; 5] = [0.45, 0.75, 1.0, 0.75, 0.45];
+    let (bw, gap, max_h, min_h) = (2.5, 2.25, 16.0, 2.5);
+    let span = 5.0 * bw + 4.0 * gap;
     for (i, s) in SHAPE.iter().enumerate() {
-        let wave = 0.72 + 0.28 * (t * 8.5 + i as f32 * 1.25).sin();
+        let wave = 0.7 + 0.3 * (t * 8.0 + i as f32 * 1.1).sin();
         let h = min_h + (max_h - min_h) * (level * s * wave).clamp(0.0, 1.0);
-        let x = cx - total / 2.0 + i as f32 * (bw + gap);
-        let c = theme::ACCENT.mix(theme::ACCENT2, i as f32 / 4.0);
+        let x = cx - span / 2.0 + i as f32 * (bw + gap);
+        let c = Color::white(0.94).mix(theme::ACCENT2, 0.2 + 0.12 * (i as f32 - 2.0).abs());
         g.fill(Rect::new(x, cy - h / 2.0, bw, h), bw / 2.0, c);
     }
 }
 
-/// Three pulsing dots.
-fn dots(g: &mut Gfx, cx: f32, cy: f32, t: f32) {
-    for i in 0..3 {
-        let phase = (t * 5.0 - i as f32 * 0.7).sin() * 0.5 + 0.5;
-        let c = theme::ACCENT.mix(theme::ACCENT2, i as f32 / 2.0).alpha(0.3 + 0.7 * phase);
-        g.circle(cx + (i as f32 - 1.0) * 7.0, cy - phase * 1.5, 2.6, c);
-    }
-}
-
-/// A highlight sweeping along the card's bottom edge.
-fn shimmer(g: &mut Gfx, track: Rect, t: f32) {
-    let seg = track.w * 0.28;
-    let p = (t * 0.9).fract();
-    let x = track.x - seg + p * (track.w + seg);
-    let a = Rect::new(x.max(track.x), track.y, (x + seg / 2.0).min(track.right()) - x.max(track.x), track.h);
-    let b = Rect::new((x + seg / 2.0).max(track.x), track.y, (x + seg).min(track.right()) - (x + seg / 2.0).max(track.x), track.h);
-    if a.w > 0.0 {
-        g.hgradient(a, 0.0, theme::ACCENT.alpha(0.0), theme::ACCENT2.alpha(0.9));
-    }
-    if b.w > 0.0 {
-        g.hgradient(b, 0.0, theme::ACCENT2.alpha(0.9), theme::ACCENT.alpha(0.0));
+/// Eight dots on a circle, brightness chasing around.
+fn spinner(g: &mut Gfx, cx: f32, cy: f32, t: f32) {
+    let head = t * 1.4;
+    for i in 0..8 {
+        let a = i as f32 / 8.0;
+        let behind = (head - a).rem_euclid(1.0);
+        let alpha = 0.22 + 0.78 * (1.0 - behind).powi(2);
+        let ang = a * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        g.circle(cx + ang.cos() * 7.5, cy + ang.sin() * 7.5, 1.9, Color::white(0.9).mix(theme::ACCENT2, 0.35).alpha(alpha));
     }
 }
 
@@ -400,6 +444,11 @@ struct Anim {
     last: Option<Frame>,
     level: f32,
     timer: bool,
+    /// Displayed geometry, easing toward the layout.
+    geo: Option<Geo>,
+    /// While recording the card only grows (no jumping as words change).
+    min_w: f32,
+    min_h: f32,
 }
 
 thread_local! {
@@ -411,6 +460,9 @@ thread_local! {
         last: None,
         level: 0.0,
         timer: false,
+        geo: None,
+        min_w: 0.0,
+        min_h: 0.0,
     });
 }
 
@@ -484,9 +536,9 @@ unsafe fn render(hwnd: HWND) {
     ANIM.with(|cell| {
         let mut anim = cell.borrow_mut();
         let anim = &mut *anim;
-        let (mode, live, hover, min_h) = {
+        let (mode, live, split, hover) = {
             let v = VIEW.lock().unwrap();
-            (v.mode.clone(), v.live.clone(), v.hover, v.min_h)
+            (v.mode.clone(), v.live.clone(), v.split, v.hover)
         };
         let wanted = match &mode {
             Mode::Live(_) | Mode::Transcribing => ENABLED.load(Ordering::Relaxed),
@@ -506,7 +558,7 @@ unsafe fn render(hwnd: HWND) {
             let k = if target > anim.level { 0.55 } else { 0.18 };
             anim.level += (target - anim.level) * k;
             let elapsed = if status.phase == crate::status::Phase::Recording { status.phase_since.elapsed().as_secs_f32() } else { 0.0 };
-            let f = Frame { mode: mode.clone(), live, level: anim.level, elapsed, t: (now - anim.shown_at).as_secs_f32(), hover };
+            let f = Frame { mode: mode.clone(), live, split, level: anim.level, elapsed, t: (now - anim.shown_at).as_secs_f32(), hover };
             anim.last = Some(f.clone());
             f
         } else {
@@ -520,7 +572,9 @@ unsafe fn render(hwnd: HWND) {
                 anim.hiding_since = None;
                 anim.last = None;
                 anim.level = 0.0;
-                VIEW.lock().unwrap().min_h = 0.0;
+                anim.geo = None;
+                anim.min_w = 0.0;
+                anim.min_h = 0.0;
                 set_timer(hwnd, anim, false);
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_HIDE);
@@ -543,15 +597,47 @@ unsafe fn render(hwnd: HWND) {
             (dx.max(96) as f32, mi.rcWork)
         };
         let scale = dpi / 96.0;
-        let Some(s) = surface(anim, 1, 1, dpi).map(|s| s as *mut Surface) else { return };
-        // Measure with the current surface, then size it.
-        let (mut card_h, lh, shown, total) = measure(unsafe { &mut (*s).g }, &frame);
-        if matches!(frame.mode, Mode::Live(_) | Mode::Transcribing) && wanted {
-            card_h = card_h.max(min_h);
-            VIEW.lock().unwrap().min_h = card_h;
+        // Lay out with whatever surface exists, then size the bitmap.
+        if anim.surface.is_none() && surface(anim, 1, 1, dpi).is_none() {
+            return;
         }
+        let mut target = {
+            let g = &mut anim.surface.as_mut().unwrap().g;
+            if g.dpi != dpi {
+                g.set_dpi(dpi);
+            }
+            layout(g, &frame)
+        };
+        let recording = matches!(frame.mode, Mode::Live(_) | Mode::Transcribing);
+        if recording && wanted {
+            if target.w < anim.min_w {
+                // Keep the width; wrap the text to it.
+                let g = &mut anim.surface.as_mut().unwrap().g;
+                let mut f2 = frame.clone();
+                f2.t = 0.0;
+                target = layout_at(g, &f2, anim.min_w);
+            }
+            target.h = target.h.max(anim.min_h);
+            anim.min_w = target.w;
+            anim.min_h = target.h;
+        } else if wanted {
+            anim.min_w = 0.0;
+            anim.min_h = 0.0;
+        }
+        // Ease the displayed geometry toward the target.
+        let geo = match anim.geo {
+            Some(cur) if anim.hiding_since.is_none() => {
+                let k = 0.34;
+                let step = |a: f32, b: f32| if (b - a).abs() < 0.4 { b } else { a + (b - a) * k };
+                Geo { w: step(cur.w, target.w), h: step(cur.h, target.h), scroll: step(cur.scroll, target.scroll), ..target }
+            }
+            Some(cur) => cur,
+            None => target,
+        };
+        let settling = (geo.w - target.w).abs() > 0.01 || (geo.h - target.h).abs() > 0.01 || (geo.scroll - target.scroll).abs() > 0.01;
+        anim.geo = Some(geo);
         let px = |v: f32| (v * scale).round() as i32;
-        let (w, h) = (px(CARD_W + 2.0 * MARGIN), px(card_h + 2.0 * MARGIN));
+        let (w, h) = (px(MAX_W + 2.0 * MARGIN), px(geo.h + 2.0 * MARGIN));
         let Some(s) = surface(anim, w, h, dpi) else { return };
         let buttons = unsafe {
             let r = RECT { left: 0, top: 0, right: w, bottom: h };
@@ -560,7 +646,7 @@ unsafe fn render(hwnd: HWND) {
             }
             s.g.begin();
             s.g.clear(Color(0.0, 0.0, 0.0, 0.0));
-            let b = draw(&mut s.g, &frame, card_h, lh, shown, total);
+            let b = draw(&mut s.g, &frame, &geo);
             if !s.g.end() {
                 anim.surface = None;
                 return;
@@ -625,7 +711,8 @@ unsafe fn render(hwnd: HWND) {
         }
         let moving = matches!(frame.mode, Mode::Live(_) | Mode::Transcribing | Mode::Progress(..))
             || anim.hiding_since.is_some()
-            || fade < 1.0;
+            || fade < 1.0
+            || settling;
         set_timer(hwnd, anim, moving);
     });
 }
@@ -798,6 +885,7 @@ pub fn selftest() -> Result<(), String> {
         let frame = Frame {
             mode: Mode::Card { text: "Self-test".into(), reason: "Not pasted".into(), copied: false },
             live: String::new(),
+            split: 0,
             level: 0.0,
             elapsed: 0.0,
             t: 0.0,
@@ -805,14 +893,14 @@ pub fn selftest() -> Result<(), String> {
         };
         let dpi = 144.0;
         let s = surface(&mut anim, 1, 1, dpi).ok_or("surface")?;
-        let (card_h, lh, shown, total) = measure(&mut s.g, &frame);
-        let (w, h) = (((CARD_W + 2.0 * MARGIN) * 1.5) as i32, ((card_h + 2.0 * MARGIN) * 1.5) as i32);
+        let geo = layout(&mut s.g, &frame);
+        let (w, h) = (((MAX_W + 2.0 * MARGIN) * 1.5) as i32, ((geo.h + 2.0 * MARGIN) * 1.5) as i32);
         let s = surface(&mut anim, w, h, dpi).ok_or("surface")?;
         unsafe {
             s.rt.BindDC(s.mem, &RECT { left: 0, top: 0, right: w, bottom: h }).map_err(|e| e.to_string())?;
             s.g.begin();
             s.g.clear(Color(0.0, 0.0, 0.0, 0.0));
-            draw(&mut s.g, &frame, card_h, lh, shown, total);
+            draw(&mut s.g, &frame, &geo);
             if !s.g.end() {
                 return Err("EndDraw failed".into());
             }
@@ -844,10 +932,17 @@ pub fn render_png(kind: &str, path: &std::path::Path, scale: f32) -> Result<(), 
                 second test run won't be ready before Wednesday evening, and I'd rather walk everyone through the \
                 final version than a draft that changes again the next morning.";
     let short = "Let's ship the overlay redesign today and";
+    let mut split = usize::MAX;
     let (mode, live, level, elapsed, hover) = match kind {
-        "live" => (Mode::Live(short.into()), short.to_string(), 0.7, 7.0, None),
+        "live" => {
+            split = short[..20].rfind(' ').unwrap_or(0);
+            (Mode::Live(short.into()), short.to_string(), 0.7, 7.0, None)
+        }
         "listening" => (Mode::Live(String::new()), String::new(), 0.1, 1.0, None),
-        "long" => (Mode::Live(long.into()), long.to_string(), 0.55, 23.0, None),
+        "long" => {
+            split = long[..long.len() - 40].rfind(' ').unwrap_or(0);
+            (Mode::Live(long.into()), long.to_string(), 0.55, 23.0, None)
+        }
         "transcribing" => (Mode::Transcribing, long.to_string(), 0.0, 0.0, None),
         "notice" => (Mode::Notice("Downloaded Parakeet Unified EN 0.6B".into()), String::new(), 0.0, 0.0, None),
         "warning" => (Mode::Notice("Download failed: Parakeet Unified EN 0.6B".into()), String::new(), 0.0, 0.0, None),
@@ -867,7 +962,7 @@ pub fn render_png(kind: &str, path: &std::path::Path, scale: f32) -> Result<(), 
             Some(Button::Copy),
         ),
     };
-    let frame = Frame { mode, live, level, elapsed, t: 1.3, hover };
+    let frame = Frame { mode, live, split, level, elapsed, t: 1.3, hover };
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(e)?;
@@ -884,8 +979,8 @@ pub fn render_png(kind: &str, path: &std::path::Path, scale: f32) -> Result<(), 
         let scratch = wic.CreateBitmap(4, 4, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand).map_err(e)?;
         let rt = factory.CreateWicBitmapRenderTarget(&scratch, &props).map_err(e)?;
         let mut g = Gfx::from_target(rt.cast().map_err(e)?, dpi).map_err(e)?;
-        let (card_h, lh, shown, total) = measure(&mut g, &frame);
-        let (bw, bh) = (CARD_W + 2.0 * MARGIN + 80.0, card_h + 2.0 * MARGIN + 60.0);
+        let geo = layout(&mut g, &frame);
+        let (bw, bh) = (MAX_W + 2.0 * MARGIN + 80.0, geo.h + 2.0 * MARGIN + 60.0);
         let (pw, ph) = ((bw * scale) as u32, (bh * scale) as u32);
         let bmp = wic.CreateBitmap(pw, ph, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand).map_err(e)?;
         let rt = factory.CreateWicBitmapRenderTarget(&bmp, &props).map_err(e)?;
@@ -897,7 +992,7 @@ pub fn render_png(kind: &str, path: &std::path::Path, scale: f32) -> Result<(), 
         g.gradient(Rect::new(0.0, 0.0, bw, bh), 0.0, Color::rgb(58, 74, 96), Color::rgb(214, 220, 228));
         g.fill(Rect::new(0.0, bh * 0.55, bw * 0.45, bh), 0.0, Color::rgb(245, 245, 247));
         g.rt.SetTransform(&windows_numerics::Matrix3x2::translation(40.0, 30.0));
-        draw(&mut g, &frame, card_h, lh, shown, total);
+        draw(&mut g, &frame, &geo);
         g.rt.SetTransform(&windows_numerics::Matrix3x2::identity());
         g.end();
 

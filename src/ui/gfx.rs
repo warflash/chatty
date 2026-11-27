@@ -285,14 +285,60 @@ impl Gfx {
         (m.widthIncludingTrailingWhitespace, m.height)
     }
 
-    /// (line count, height) of wrapped `s`.
-    pub fn wrapped(&mut self, s: &str, font: Font, max_w: f32) -> (u32, f32) {
+    /// Wrapped layout with a fixed line height.
+    fn spaced(&mut self, s: &str, font: Font, max_w: f32, line_h: f32) -> IDWriteTextLayout {
         let l = self.layout(s, font, max_w, true, Align::Left);
+        unsafe {
+            let _ = l.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_h, line_h * 0.76);
+        }
+        l
+    }
+
+    /// Line count of wrapped `s` at a fixed line height.
+    pub fn line_count(&mut self, s: &str, font: Font, max_w: f32, line_h: f32) -> u32 {
+        let l = self.spaced(s, font, max_w, line_h);
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe {
             let _ = l.GetMetrics(&mut m);
         }
-        (m.lineCount, m.height)
+        m.lineCount.max(1)
+    }
+
+    /// Wrapped text at a fixed line height: UTF-16 units before `split` in
+    /// `c1`, the rest in `c2`.
+    pub fn text_two(&mut self, s: &str, split: usize, font: Font, r: Rect, line_h: f32, c1: Color, c2: Color) {
+        if s.is_empty() {
+            return;
+        }
+        let l = self.spaced(s, font, r.w, line_h);
+        unsafe {
+            let total = s.encode_utf16().count() as u32;
+            let split = (split as u32).min(total);
+            if split < total {
+                if let Ok(b) = self.rt.CreateSolidColorBrush(&c2.d2d(), None) {
+                    let _ = l.SetDrawingEffect(&b, DWRITE_TEXT_RANGE { startPosition: split, length: total - split });
+                }
+            }
+            self.set(c1);
+            self.rt.DrawTextLayout(Vector2 { X: r.x, Y: r.y }, &l, &self.brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        }
+    }
+
+    /// Rounded-rect outline with a vertical gradient.
+    pub fn stroke_vgradient(&self, r: Rect, radius: f32, top: Color, bottom: Color, width: f32) {
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: top.d2d() },
+                D2D1_GRADIENT_STOP { position: 1.0, color: bottom.d2d() },
+            ];
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 { X: r.x, Y: r.y },
+                endPoint: Vector2 { X: r.x, Y: r.bottom() },
+            };
+            let Ok(b) = self.rt.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            self.rt.DrawRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: radius, radiusY: radius }, &b, width, None);
+        }
     }
 
     /// Horizontal gradient fill.

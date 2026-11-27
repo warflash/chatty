@@ -1035,7 +1035,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "mouse_button",
         cfg.mouse_button,
     );
-    let r = row(ui, c, "Transcription", "Full context re-reads the whole sentence (more accurate); streaming is lighter on CPU", 300.0);
+    let r = row(ui, c, "Transcription", "Full context re-reads the open sentence every 300 ms (more accurate); streaming decodes each chunk once (less GPU work)", 300.0);
     let modes = ["segments", "stream"];
     let mi = modes.iter().position(|m| *m == cfg.decode).unwrap_or(0);
     if let Some(i) = ui.segmented("set/decode", &["Full context", "Streaming"], mi, r) {
