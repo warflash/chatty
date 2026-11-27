@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.webp" alt="chatty: hold a key, talk, let go, and the text is typed where you are" width="100%">
+<img src="assets/banner.avif" alt="chatty: hold a key, talk, let go, and the text is typed where you are" width="100%">
 
 [![CI](https://github.com/warflash/chatty/actions/workflows/ci.yml/badge.svg)](https://github.com/warflash/chatty/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-8284ff)](LICENSE) ![Windows 11](https://img.shields.io/badge/Windows%2011-x64-a78bfa)
 
@@ -8,12 +8,13 @@
 
 Push-to-talk dictation for Windows. One Rust executable in the tray; speech recognition runs locally on your GPU (Vulkan) or CPU, and nothing leaves the PC. Text is pasted about 120 ms after you let go.
 
-<table>
-<tr>
-<td width="50%"><img src="assets/screens/overlay-live.png" alt="Live overlay while recording"></td>
-<td width="50%"><img src="assets/screens/overlay-copied.png" alt="Transcript card with a Copy button"></td>
-</tr>
-</table>
+While you hold the key, the overlay shows the words as they arrive:
+
+<img src="assets/overlay-live.avif" alt="Live overlay while recording: level bars, words arriving, a timer" width="100%">
+
+If no text field has focus, the transcript waits on a card instead of being pasted:
+
+<img src="assets/overlay-copy.avif" alt="Transcript card with a Copy button when no text field had focus" width="100%">
 
 ## Install
 
