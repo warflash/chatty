@@ -1076,14 +1076,14 @@ mod tests {
     #[test]
     fn speech_range_is_padded_and_clamped() {
         let mut probs = vec![0.0; 100];
-        for p in &mut probs[10..20] {
+        for p in &mut probs[20..30] {
             *p = 0.9;
         }
         let s = analyze_speech(&probs, 0.5, 100 * 512);
         assert_eq!(s.speech_ms, 10 * 32);
         let (a, b) = s.range.unwrap();
-        assert_eq!(a, 10 * 512 - 3200);
-        assert_eq!(b, 20 * 512 + 4800);
+        assert_eq!(a, 20 * 512 - 6400);
+        assert_eq!(b, 30 * 512 + 4800);
         // Speech at the very end is clamped to the buffer.
         let mut probs = vec![0.0; 10];
         for p in &mut probs[7..] {
