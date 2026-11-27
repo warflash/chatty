@@ -30,6 +30,9 @@ static ESC_SWALLOWED: AtomicBool = AtomicBool::new(false);
 /// Set by the coordinator while armed or recording.
 pub static ESCAPE_WANTED: AtomicBool = AtomicBool::new(false);
 static TX: OnceLock<Sender<KeyEvent>> = OnceLock::new();
+/// `CHATTY_ACCEPT_INJECTED=1`: treat synthesized trigger keys as real (for
+/// end-to-end tests). Ctrl+V and Enter that chatty sends itself still pass.
+static ACCEPT_INJECTED: AtomicBool = AtomicBool::new(false);
 
 /// True while any trigger key is physically down.
 pub fn trigger_keys_down() -> bool {
@@ -49,7 +52,9 @@ fn send(input: Input) {
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        if kb.flags.0 & LLKHF_INJECTED.0 == 0 {
+        let injected = kb.flags.0 & LLKHF_INJECTED.0 != 0;
+        let ours = kb.dwExtraInfo == crate::input::OUR_INPUT;
+        if !injected || (ACCEPT_INJECTED.load(Ordering::Relaxed) && !ours) {
             let msg = wparam.0 as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
@@ -96,6 +101,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 /// messages, so a busy UI thread can never delay key handling.
 pub fn start(tx: Sender<KeyEvent>) {
     let _ = TX.set(tx);
+    if std::env::var_os("CHATTY_ACCEPT_INJECTED").is_some() {
+        log::warn!("accepting injected trigger keys (test mode)");
+        ACCEPT_INJECTED.store(true, Ordering::Relaxed);
+    }
     std::thread::Builder::new()
         .name("hook".into())
         .spawn(|| unsafe {

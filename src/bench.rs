@@ -50,9 +50,14 @@ fn bench_asr(wav: &str, ids: &[String]) -> Result<(), String> {
         let mut session = model.session().map_err(|e| e.to_string())?;
         let load = ms(t);
         let run = RunOptions { language: spec.language_arg("auto"), ..Default::default() };
+        // The engine's warm-up, then the first real run.
+        let t = Instant::now();
+        crate::engine::warm_up(&mut session, spec, &run);
+        let warm = ms(t);
         let t = Instant::now();
         let _ = session.run(&audio, &run);
         let first = ms(t);
+        println!("  warm-up {warm:.0} ms, first real run after warm-up {first:.0} ms");
         let mut times = Vec::new();
         let mut text = String::new();
         for _ in 0..3 {
@@ -86,6 +91,7 @@ fn bench_asr(wav: &str, ids: &[String]) -> Result<(), String> {
                 finals.push(ms(t));
                 text = stream.text().full;
             }
+            println!("  streaming finalize per run (first is right after warm-up): {finals:.1?} ms");
             finals.sort_by(f64::total_cmp);
             println!(
                 "  streaming: feeds {feeds:.0} ms total ({:.3} x realtime), finalize after release min {:.1} / median {:.1} ms",

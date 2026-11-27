@@ -37,14 +37,9 @@ pub struct Control {
 /// The consumer side, owned by the engine thread.
 pub struct Capture {
     ring: rtrb::Consumer<f32>,
-    rate: Arc<AtomicU32>,
 }
 
 impl Capture {
-    pub fn rate(&self) -> u32 {
-        self.rate.load(Ordering::Acquire)
-    }
-
     /// Moves everything captured so far into `out` (device rate, mono).
     pub fn drain(&mut self, out: &mut Vec<f32>) {
         let n = self.ring.slots();
@@ -94,16 +89,86 @@ pub fn spawn() -> (Control, Capture) {
     let producer = Arc::new(Mutex::new(producer));
     let rate = Arc::new(AtomicU32::new(48_000));
     let (tx, rx) = mpsc::channel();
-    let thread_rate = rate.clone();
     std::thread::Builder::new()
         .name("audio".into())
-        .spawn(move || control_loop(rx, producer, thread_rate))
+        .spawn(move || control_loop(rx, producer, rate))
         .expect("spawn audio thread");
-    (Control { tx }, Capture { ring: consumer, rate })
+    (Control { tx }, Capture { ring: consumer })
+}
+
+/// Test source: `CHATTY_TEST_WAV` replays a WAV file as the microphone, at
+/// real-time pace, from the start of each recording.
+struct FileSource {
+    stop: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
+}
+
+impl FileSource {
+    fn start(path: &str, producer: Arc<Mutex<rtrb::Producer<f32>>>, rate: Arc<AtomicU32>) -> Result<Self, String> {
+        let (pcm, r) = crate::wav::read(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+        rate.store(r, Ordering::Release);
+        let stop = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(true));
+        let (s, rs) = (stop.clone(), restart.clone());
+        std::thread::spawn(move || {
+            let chunk = r as usize / 100;
+            let mut pos = 0;
+            let mut next = Instant::now();
+            while !s.load(Ordering::Relaxed) {
+                next += Duration::from_millis(10);
+                if rs.swap(false, Ordering::Relaxed) {
+                    pos = 0;
+                }
+                if CAPTURING.load(Ordering::Acquire) {
+                    let end = (pos + chunk).min(pcm.len());
+                    let mut buf: Vec<f32> = pcm[pos..end].to_vec();
+                    buf.resize(chunk, 0.0); // silence after the file ends
+                    pos = end;
+                    if let Ok(mut p) = producer.lock() {
+                        for v in buf {
+                            let _ = p.push(v);
+                        }
+                    }
+                }
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+        });
+        log::warn!("test microphone: {path} ({r} Hz)");
+        Ok(FileSource { stop, restart })
+    }
+}
+
+impl Drop for FileSource {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+enum Stream {
+    Device(cpal::Stream),
+    File(FileSource),
+}
+
+impl Stream {
+    fn play(&self) -> Result<(), String> {
+        match self {
+            Stream::Device(s) => s.play().map_err(|e| e.to_string()),
+            Stream::File(f) => {
+                f.restart.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+    }
+
+    fn pause(&self) {
+        if let Stream::Device(s) = self {
+            let _ = s.pause();
+        }
+    }
 }
 
 struct Open {
-    stream: cpal::Stream,
+    stream: Stream,
     device: String,
 }
 
@@ -132,7 +197,7 @@ fn control_loop(rx: Receiver<Cmd>, producer: Arc<Mutex<rtrb::Producer<f32>>>, ra
             }
             Some(Cmd::Stop) => {
                 if let Some(o) = &open {
-                    let _ = o.stream.pause();
+                    o.stream.pause();
                 }
                 close_at = Some(Instant::now() + keep_open);
             }
@@ -145,7 +210,11 @@ fn control_loop(rx: Receiver<Cmd>, producer: Arc<Mutex<rtrb::Producer<f32>>>, ra
                 let t0 = Instant::now();
                 let mut opened = false;
                 if open.is_none() {
-                    match open_stream(&device, producer.clone(), rate.clone()) {
+                    let stream = match std::env::var("CHATTY_TEST_WAV") {
+                        Ok(path) => FileSource::start(&path, producer.clone(), rate.clone()).map(Stream::File),
+                        Err(_) => open_stream(&device, producer.clone(), rate.clone()).map(Stream::Device),
+                    };
+                    match stream {
                         Ok(stream) => {
                             open = Some(Open { stream, device });
                             opened = true;

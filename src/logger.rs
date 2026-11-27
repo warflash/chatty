@@ -20,7 +20,14 @@ fn timestamp() -> String {
 
 impl log::Log for Logger {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        m.level() <= self.level && !m.target().starts_with("egui") && !m.target().starts_with("eframe")
+        let t = m.target();
+        // transcribe.cpp logs every chunk at debug; keep it to trace.
+        let level = if t.starts_with("transcribe_cpp") && self.level < log::LevelFilter::Trace {
+            log::LevelFilter::Info
+        } else {
+            self.level
+        };
+        m.level() <= level && !t.starts_with("egui") && !t.starts_with("eframe") && !t.starts_with("winit")
     }
 
     fn log(&self, r: &log::Record) {

@@ -15,6 +15,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::PWSTR;
 
+/// `dwExtraInfo` tag on keys chatty sends, so its own hook can tell them apart.
+pub const OUR_INPUT: usize = 0x6368_6174; // "chat"
+
 fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -24,7 +27,7 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
                 wScan: 0,
                 dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: OUR_INPUT,
             },
         },
     }

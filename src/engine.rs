@@ -54,7 +54,6 @@ struct Loaded {
     _model: Model,
     session: Session,
     backend: String,
-    load_ms: f64,
     vocabulary: bool,
 }
 
@@ -214,6 +213,32 @@ fn stream_options(spec: &AsrModel) -> StreamOptions {
         }
     };
     StreamOptions { family, ..Default::default() }
+}
+
+/// First compute allocates buffers and compiles GPU pipelines (seconds on
+/// Vulkan). Run both paths once on a few seconds of low noise so the first
+/// dictation does not pay for it.
+pub fn warm_up(session: &mut Session, spec: &AsrModel, run: &RunOptions) {
+    let mut seed = 0x2545_f491u32;
+    let noise: Vec<f32> = (0..audio::RATE as usize * 3)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed as f32 / u32::MAX as f32 - 0.5) * 0.02
+        })
+        .collect();
+    if let Err(e) = session.run(&noise, run) {
+        log::debug!("warm-up run: {e}");
+    }
+    if spec.is_streaming() {
+        if let Ok(mut s) = session.stream(run, &stream_options(spec)) {
+            for chunk in noise.chunks(320) {
+                let _ = s.feed(chunk);
+            }
+            let _ = s.finalize();
+        }
+    }
 }
 
 fn ms(d: Duration) -> f64 {
@@ -554,22 +579,12 @@ impl Worker {
         let mut session = model.session().map_err(|e| format!("session {}: {e}", spec.id))?;
         let backend_name = model.backend();
         let vocabulary = model.supports(Feature::Vocabulary);
-        // Warm-up: first compute allocates buffers and compiles pipelines.
         let run = RunOptions { language: spec.language_arg(&cfg.language), ..Default::default() };
-        let silence = vec![0.0f32; audio::RATE as usize / 2];
-        if let Err(e) = session.run(&silence, &run) {
-            log::debug!("warm-up run: {e}");
-        }
-        if spec.is_streaming() {
-            if let Ok(mut s) = session.stream(&run, &stream_options(spec)) {
-                let _ = s.feed(&silence);
-                let _ = s.finalize();
-            }
-        }
+        warm_up(&mut session, spec, &run);
         let load_ms = ms(t0.elapsed());
         log::info!("model {} loaded on {} in {:.0} ms (incl. warm-up)", spec.id, backend_name, load_ms);
         self.pending_load_ms = Some(load_ms);
-        self.asr = Some(Loaded { spec, _model: model, session, backend: backend_name, load_ms, vocabulary });
+        self.asr = Some(Loaded { spec, _model: model, session, backend: backend_name, vocabulary });
         tray::set_state(TrayState::Idle);
         Ok(())
     }
@@ -612,7 +627,13 @@ impl Worker {
         let spec = loaded.spec;
         rec.model = spec.id.to_string();
         rec.backend = loaded.backend.clone();
-        let vocabulary = if loaded.vocabulary { cfg.custom_words.iter().map(|w| w.word.clone()).collect() } else { Vec::new() };
+        // Vocabulary boosting works on offline runs only (the streaming API
+        // ignores it with a warning).
+        let vocabulary = if loaded.vocabulary && !spec.is_streaming() {
+            cfg.custom_words.iter().map(|w| w.word.clone()).collect()
+        } else {
+            Vec::new()
+        };
         let run = RunOptions { language: spec.language_arg(&cfg.language), vocabulary, ..Default::default() };
         let mut pump = Pump::new(mic.rate);
         let vad_session = vad.as_mut().map(|(_, s)| {

@@ -68,6 +68,8 @@ pub struct AsrModel {
     pub languages: &'static [&'static str],
     pub lang: Lang,
     pub streaming: Streaming,
+    /// Why this model is on the list (documentation; not shown in the UI).
+    #[allow(dead_code)]
     pub note: &'static str,
 }
 

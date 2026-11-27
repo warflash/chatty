@@ -81,10 +81,12 @@ impl Machine {
         matches!(self.stage, Stage::Armed { .. } | Stage::Recording)
     }
 
+    #[cfg(test)]
     pub fn is_recording(&self) -> bool {
         self.stage == Stage::Recording
     }
 
+    #[cfg(test)]
     pub fn is_busy(&self) -> bool {
         self.stage == Stage::Processing
     }

@@ -413,7 +413,6 @@ pub struct WordRow {
 
 #[derive(Debug, Default, Clone)]
 pub struct HistoryRow {
-    pub id: i64,
     pub at: String,
     pub app: String,
     pub model: String,
@@ -695,7 +694,6 @@ pub fn report(db: &Db, typing_wpm: f64, history: usize) -> Result<Report, String
         &[(history as i64).into()],
     )? {
         r.history.push(HistoryRow {
-            id: row[0].int(),
             at: row[1].text(),
             app: row[2].text(),
             model: row[3].text(),

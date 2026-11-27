@@ -171,10 +171,16 @@ unsafe fn layout_and_show(hwnd: HWND) {
             return;
         }
         let Some((_, text, _)) = content(&mode, &live_text) else { return };
-        let dpi = GetDpiForWindow(GetForegroundWindow()).max(96);
-        let p = Paint { hwnd, scale: dpi as f32 / 96.0 };
         let fg = GetForegroundWindow();
         let monitor = MonitorFromWindow(if fg.is_invalid() { hwnd } else { fg }, MONITOR_DEFAULTTOPRIMARY);
+        let (mut dpi, mut _dpi_y) = (96u32, 96u32);
+        let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(
+            monitor,
+            windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI,
+            &mut dpi,
+            &mut _dpi_y,
+        );
+        let p = Paint { hwnd, scale: dpi.max(96) as f32 / 96.0 };
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(monitor, &mut mi);
         let work = mi.rcWork;
