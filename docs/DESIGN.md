@@ -11,7 +11,7 @@ dictate; release to paste; tap to press Enter.
 | Win32 (hook, tray, overlay, clipboard, SendInput) | `windows` | direct API, nothing else |
 | Microphone | `cpal` (WASAPI) | small, pure Rust |
 | Ring buffer | `rtrb` | lock-free SPSC between the audio callback and the engine |
-| Stats window | `eframe`/`egui` (glow) | native, no webview; started lazily |
+| Stats window | raw Win32 + GDI (double-buffered, scrollable) | egui/eframe was ~70% of the clean build time and 6 MB of the exe |
 | SQLite | own 200-line FFI to Windows' `winsqlite3.dll` via `raw-dylib` | nothing compiled, nothing shipped |
 | Config | `toml` + `toml_edit` | tray edits keep comments |
 | Downloads | `ureq` with native-tls (SChannel) | no `ring`/C build |
@@ -53,8 +53,9 @@ engine ──── model, VAD, cleanup LLM; drains ring every 20 ms, streams or
      ├─ download threads (on demand)
      └─ stats writer thread ── SQLite
 main thread ─ message loop: tray icon + menu, overlay window, clipboard owner
+   also the statistics window (created on first open, hidden on close);
+   its report is computed on a short-lived thread
 config watcher ─ FindFirstChangeNotification, reloads config.toml
-stats-ui thread ─ egui, started on first open, hidden on close
 ```
 
 The hook callback never blocks: it reads/writes atomics and does one
@@ -119,7 +120,7 @@ src/cleanup.rs      LLM prompt + drift guard + tests
 src/llama.rs        llama.dll binding (activation context)
 src/models.rs       curated model list, verified downloads
 src/stats.rs        schema, writer, report queries
-src/stats_ui.rs     egui statistics window
+src/stats_ui.rs     statistics window (GDI)
 src/sqlite.rs       winsqlite3 FFI
 src/overlay.rs      click-through overlay
 src/tray.rs         tray icon and menu
@@ -134,5 +135,20 @@ src/clipboard.rs, input.rs, config.rs, paths.rs, logger.rs, wav.rs, bench.rs
   because `winsqlite3` returns NULL for SQLite's `'localtime'` modifier.
 * Clipboard formats backed by GDI handles (bitmaps, metafiles) are not
   saved; Windows re-synthesizes CF_BITMAP from a saved CF_DIB.
-* The stats window is one egui event loop per process (winit limit), hidden
-  rather than destroyed on close.
+* The stats window is plain GDI: text, filled rectangles and a few buttons
+  laid out into a flat item list. `chatty --stats` opens it standalone.
+* Release uses thin LTO (16 codegen units): fat LTO with one codegen unit
+  made the final crate a 57 s serial step and the clean CI build too slow.
+* transcribe.cpp 0.5.1 rejects the literal language "auto" for nemotron;
+  chatty passes no language, which selects the model's auto slot.
+
+## Testing without hardware
+
+* `CHATTY_TEST_WAV=<wav>` replays a file as the microphone (real-time pace,
+  from the start of each recording).
+* `CHATTY_ACCEPT_INJECTED=1` lets synthesized trigger keys through the hook
+  (chatty's own Ctrl+V/Enter are tagged and still ignored).
+* `scripts/e2e.ps1 -HoldMs N [-Escape]` sends Ctrl+Numpad / like the mouse,
+  including key repeats.
+* `chatty --bench <wav> [models]` and `--bench-cleanup <text> [model]`
+  print per-stage timings.

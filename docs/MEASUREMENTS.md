@@ -67,7 +67,7 @@ S1-mini is the default. Qwen3.5-0.8B dropped "I think" and kept "um".
 
 ## Resources
 
-* `chatty.exe`: 7.1 MB (fat LTO) / 8.2 MB (thin LTO, current). Release zip
+* `chatty.exe`: 2.4 MB (thin LTO, GDI stats window; 8.2 MB with egui). Release zip
   adds transcribe.cpp (≈60 MB, mostly `ggml-vulkan.dll`) and llama.cpp
   (≈75 MB) DLLs.
 * Idle CPU: **0.05 %** of one core over 60 s (model loaded, microphone
@@ -82,7 +82,8 @@ S1-mini is the default. Qwen3.5-0.8B dropped "I think" and kept "um".
 
 ## Build times
 
-* Clean release build, 4 jobs: 121 s with fat LTO + 1 codegen unit;
-  ~105 s with thin LTO + 16 codegen units (current). 12-core local: 100 s.
-* `cargo test --release` after a release build: 9 s.
+* Clean release build, 4 jobs: **37 s** (thin LTO, no egui). With the egui
+  stats window it was 105 s (thin LTO) / 121 s (fat LTO, 1 codegen unit),
+  and 6 m 26 s on the windows-latest runner.
+* `cargo test --release` after a release build: 7 s.
 * Incremental (one file touched): debug 8 s, release (thin LTO) 20 s.

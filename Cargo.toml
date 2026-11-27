@@ -11,8 +11,7 @@ publish = false
 # scripts/fetch-native.ps1. Change it here only.
 transcribe-cpp = { version = "=0.5.1", default-features = false }
 cpal = "0.18.2"
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
-log = "0.4.35"
+log = { version = "0.4.35", features = ["std"] }
 rtrb = "0.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
@@ -20,12 +19,12 @@ sha2 = "0.11.2"
 toml = "1.2.3"
 toml_edit = "0.25.21"
 ureq = { version = "3.5.2", default-features = false, features = ["native-tls"] }
-winit = { version = "0.30", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_Console",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Security",
