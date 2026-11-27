@@ -74,9 +74,13 @@ pub fn set_state(s: TrayState) {
     }
 }
 
-/// The window/taskbar icon: the idle tray glyph.
+/// The window/taskbar icon: the exe's embedded icon (build.rs, resource 1),
+/// or the idle tray glyph if that is missing.
 pub fn app_icon() -> HICON {
-    icon_for(TrayState::Idle)
+    unsafe {
+        let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
+        LoadIconW(Some(instance.into()), windows::core::PCWSTR(1 as *const u16)).unwrap_or_else(|_| icon_for(TrayState::Idle))
+    }
 }
 
 pub fn set_tooltip(s: &str) {
