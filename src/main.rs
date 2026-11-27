@@ -16,9 +16,10 @@ mod overlay;
 mod paths;
 mod sqlite;
 mod stats;
-mod stats_ui;
+mod status;
 mod text;
 mod tray;
+mod ui;
 mod wav;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -195,11 +196,8 @@ fn main() {
 
     let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }.map(|h| HINSTANCE(h.0)).unwrap_or_default();
     overlay::create(instance);
-    let stats_cfg = cfg.clone();
-    let main_hwnd = tray::create(
-        instance,
-        tray::Actions { cfg: cfg.clone(), open_stats: Box::new(move || stats_ui::open(stats_cfg.clone())) },
-    );
+    ui::init(cfg.clone(), Some(engine.clone()));
+    let main_hwnd = tray::create(instance, tray::Actions { cfg: cfg.clone() });
     clipboard::OWNER.store(main_hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
     engine.send(engine::Cmd::Warm);
     log::info!("ready in {:?}", t0.elapsed());

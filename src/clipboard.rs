@@ -139,6 +139,23 @@ pub fn set_text(text: &str) -> Result<u32, String> {
     Ok(unsafe { GetClipboardSequenceNumber() })
 }
 
+/// Plain text on the clipboard, if any.
+pub fn get_text() -> Option<String> {
+    let _open = Open::new().ok()?;
+    unsafe {
+        let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+        let hg = HGLOBAL(h.0);
+        let p = GlobalLock(hg) as *const u16;
+        if p.is_null() {
+            return None;
+        }
+        let len = (0..).take_while(|&i| *p.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+        let _ = GlobalUnlock(hg);
+        Some(s)
+    }
+}
+
 /// Restores `saved` unless someone changed the clipboard since `sequence`.
 pub fn restore(saved: Saved, sequence: u32) -> Result<bool, String> {
     if unsafe { GetClipboardSequenceNumber() } != sequence {

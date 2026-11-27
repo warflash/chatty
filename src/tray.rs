@@ -21,6 +21,7 @@ const ID_CLEANUP_MODEL: usize = 1100;
 const ID_LANG: usize = 1200;
 const ID_CLEANUP_TOGGLE: usize = 1300;
 const ID_STATS: usize = 1301;
+const ID_OPEN: usize = 1307;
 const ID_CONFIG: usize = 1302;
 const ID_LOG: usize = 1303;
 const ID_FOLDER: usize = 1304;
@@ -45,7 +46,6 @@ static MAIN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::ne
 
 pub struct Actions {
     pub cfg: config::Shared,
-    pub open_stats: Box<dyn Fn() + Send + Sync>,
 }
 
 static ACTIONS: OnceLock<Actions> = OnceLock::new();
@@ -60,10 +60,23 @@ fn post_update() {
 }
 
 pub fn set_state(s: TrayState) {
+    use crate::status::{Phase, set_phase};
+    set_phase(match s {
+        TrayState::Idle => Phase::Idle,
+        TrayState::Recording => Phase::Recording,
+        TrayState::Busy => Phase::Transcribing,
+        TrayState::Loading => Phase::Loading,
+        TrayState::Error => Phase::Error,
+    });
     if STATE.swap(s as u8, Ordering::Relaxed) != s as u8 {
         TOOLTIP.lock().unwrap().clear();
         post_update();
     }
+}
+
+/// The window/taskbar icon: the idle tray glyph.
+pub fn app_icon() -> HICON {
+    icon_for(TrayState::Idle)
 }
 
 pub fn set_tooltip(s: &str) {
@@ -227,7 +240,8 @@ fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_POPUP, cleanup_menu.0 as usize, w!("Cleanup (LLM)"));
         append(menu, ID_OVERLAY, "Live overlay", cfg.overlay, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        append(menu, ID_STATS, "Statistics…", false, true);
+        append(menu, ID_OPEN, "Open chatty", false, true);
+        append(menu, ID_STATS, "Statistics", false, true);
         append(menu, ID_CONFIG, "Open config.toml", false, true);
         append(menu, ID_LOG, "Open log", false, true);
         append(menu, ID_FOLDER, "Open data folder", false, true);
@@ -248,7 +262,8 @@ fn handle_command(id: usize, actions: &Actions) {
     let cfg = &actions.cfg;
     match id {
         0 => {}
-        ID_STATS => (actions.open_stats)(),
+        ID_STATS => crate::ui::open(Some(crate::ui::Page::Stats)),
+        ID_OPEN => crate::ui::open(None),
         ID_CONFIG => open_path(&cfg.path),
         ID_LOG => open_path(&crate::paths::log_path()),
         ID_FOLDER => open_path(&crate::paths::local_dir()),
@@ -281,11 +296,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_TRAY => {
                 match lparam.0 as u32 {
                     WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
-                    WM_LBUTTONUP => {
-                        if let Some(a) = ACTIONS.get() {
-                            (a.open_stats)();
-                        }
-                    }
+                    WM_LBUTTONUP => crate::ui::open(None),
                     _ => {}
                 }
                 LRESULT(0)

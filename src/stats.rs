@@ -259,7 +259,11 @@ pub fn spawn_writer(cfg: crate::config::Shared) -> Writer {
             };
             for msg in rx {
                 let result = match msg {
-                    Msg::Dictation(d, audio) => insert(&db, &d, audio, cfg.get().history_size),
+                    Msg::Dictation(d, audio) => {
+                        let r = insert(&db, &d, audio, cfg.get().history_size);
+                        crate::ui::stats_changed();
+                        r
+                    }
                     Msg::Enter { at, app, latency_ms, waited_ms } => db
                         .execute(
                             "INSERT INTO enter_taps(at, local_day, app, latency_ms, waited_ms) VALUES (?, ?, ?, ?, ?)",
@@ -413,16 +417,31 @@ pub struct WordRow {
 
 #[derive(Debug, Default, Clone)]
 pub struct HistoryRow {
+    pub id: i64,
     pub at: String,
     pub app: String,
     pub model: String,
+    pub language: String,
     pub status: String,
+    pub words: i64,
     pub latency_ms: Option<f64>,
+    pub transcribe_ms: f64,
+    pub post_ms: f64,
+    pub cleanup_ms: f64,
+    pub paste_wait_ms: f64,
     pub raw: String,
     pub final_text: String,
     pub cleaned: Option<String>,
     pub cleanup_used: Option<bool>,
     pub audio: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CorrectionRow {
+    pub at: String,
+    pub word: String,
+    pub original: String,
+    pub score: f64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -463,6 +482,12 @@ pub struct Report {
     pub cleanup_rejected: i64,
     pub cleanup_avg_ms: f64,
     pub history: Vec<HistoryRow>,
+    /// Last 30 days, oldest first: ("MM-DD", words).
+    pub daily: Vec<(String, i64)>,
+    /// Release-to-paste latencies, sorted.
+    pub latencies: Vec<f64>,
+    /// Newest first.
+    pub corrections: Vec<CorrectionRow>,
 }
 
 const OK: &str = "status = 'ok'";
@@ -689,11 +714,13 @@ pub fn report(db: &Db, typing_wpm: f64, history: usize) -> Result<Report, String
 
     for row in db.query(
         "SELECT id, local_time, app, model, status, latency_ms,
-                raw_text, final_text, cleaned_text, cleanup_used, audio_path
+                raw_text, final_text, cleaned_text, cleanup_used, audio_path,
+                language, words, transcribe_ms, post_ms, cleanup_ms, paste_wait_ms
          FROM dictations ORDER BY id DESC LIMIT ?",
         &[(history as i64).into()],
     )? {
         r.history.push(HistoryRow {
+            id: row[0].int(),
             at: row[1].text(),
             app: row[2].text(),
             model: row[3].text(),
@@ -704,6 +731,41 @@ pub fn report(db: &Db, typing_wpm: f64, history: usize) -> Result<Report, String
             cleaned: (!row[8].is_null()).then(|| row[8].text()),
             cleanup_used: (!row[9].is_null()).then(|| row[9].int() != 0),
             audio: (!row[10].is_null()).then(|| row[10].text()),
+            language: row[11].text(),
+            words: row[12].int(),
+            transcribe_ms: row[13].real(),
+            post_ms: row[14].real(),
+            cleanup_ms: row[15].real(),
+            paste_wait_ms: row[16].real(),
+        });
+    }
+
+    // Words per day, last 30 days including empty days.
+    let today_n = parse_day(&today).unwrap_or(0);
+    let start = today_n - 29;
+    let (sy, sm, sd) = civil_from_days(start);
+    let mut per_day: std::collections::HashMap<String, i64> = HashMap::new();
+    for row in db.query(
+        &format!("SELECT local_day, sum(words) FROM dictations WHERE {OK} AND local_day >= ? GROUP BY 1"),
+        &[format!("{sy:04}-{sm:02}-{sd:02}").into()],
+    )? {
+        per_day.insert(row[0].text(), row[1].int());
+    }
+    r.daily = (start..=today_n)
+        .map(|n| {
+            let (y, m, d) = civil_from_days(n);
+            let key = format!("{y:04}-{m:02}-{d:02}");
+            (format!("{m:02}-{d:02}"), per_day.get(&key).copied().unwrap_or(0))
+        })
+        .collect();
+    r.latencies = lat;
+
+    for row in db.query("SELECT at, word, original, score FROM corrections ORDER BY id DESC LIMIT 50", &[])? {
+        r.corrections.push(CorrectionRow {
+            at: local(row[0].int()).time.get(5..16).unwrap_or_default().to_string(),
+            word: row[1].text(),
+            original: row[2].text(),
+            score: row[3].real(),
         });
     }
     Ok(r)

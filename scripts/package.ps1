@@ -20,6 +20,9 @@ Copy-Item (Join-Path $root 'LICENSE') (Join-Path $out 'licenses\chatty.txt')
 Copy-Item (Join-Path $root 'README.md') $out
 Copy-Item (Join-Path $root 'THIRD-PARTY.md') (Join-Path $out 'licenses')
 
+# The prebuilt DLLs carry 1970 timestamps, which zip (pre-1980) rejects.
+Get-ChildItem $out -Recurse -File | ForEach-Object { $_.LastWriteTime = Get-Date }
+
 $zip = Join-Path $root "dist\chatty-$version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip

@@ -109,6 +109,7 @@ dependencies = [
  "transcribe-cpp",
  "ureq",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]

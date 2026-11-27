@@ -75,6 +75,36 @@ fn bench_asr(wav: &str, ids: &[String]) -> Result<(), String> {
             times[1] / 1000.0 / secs
         );
         println!("  offline: {}", text.trim());
+        // Segment decoder as the engine runs it: 20 ms chunks, streaming VAD,
+        // a preview every 300 ms of audio, final pass after "release".
+        if let Ok((_vm, mut vs)) = Model::load_with(models::VAD.path(), &ModelOptions { backend: transcribe_cpp::Backend::Cpu, ..Default::default() })
+            .and_then(|m| m.vad_session().map(|s| (m, s)))
+        {
+            let mut seg = crate::engine::Segmenter::default();
+            let mut pcm = Vec::new();
+            let mut probs = Vec::new();
+            let mut previews = Vec::new();
+            for (i, chunk) in audio.chunks(320).enumerate() {
+                pcm.extend_from_slice(chunk);
+                probs.extend(vs.stream_feed(chunk).map(|r| r.probs).unwrap_or_default());
+                let due = i % 15 == 14;
+                let t = Instant::now();
+                if seg.step(&mut session, &run, &pcm, &probs, 0.5, due) && due {
+                    previews.push(ms(t));
+                }
+            }
+            probs.extend(vs.stream_flush().map(|r| r.probs).unwrap_or_default());
+            let fin = seg.finish(&mut session, &run, &pcm, &probs, 0.5)?;
+            previews.sort_by(f64::total_cmp);
+            println!(
+                "  segments: {} closed while recording, final pass after release {fin:.1} ms, preview run median {:.1} ms, total compute {:.0} ms ({:.3} x realtime)",
+                seg.closed,
+                previews.get(previews.len() / 2).copied().unwrap_or(0.0),
+                seg.compute_ms,
+                seg.compute_ms / 1000.0 / secs
+            );
+            println!("  segments: {}", seg.committed.join(" "));
+        }
         if spec.is_streaming() {
             let opts = crate::engine::stream_options_for_bench(spec);
             let mut finals = Vec::new();
@@ -142,10 +172,34 @@ fn bench_cleanup(text: &str, id: Option<&str>) -> Result<(), String> {
 pub fn main(args: &[String]) -> i32 {
     attach_console();
     let result = match args[0].as_str() {
-        "--stats" => {
+        "--render" if args.len() >= 3 => {
             let path = crate::config::path();
             let cfg = crate::config::Shared::new(path.clone(), crate::config::load_or_create(&path));
-            crate::stats_ui::run_standalone(cfg)
+            use crate::ui::Page;
+            let page = match args[1].as_str() {
+                "overview" => Page::Overview,
+                "history" => Page::History,
+                "models" => Page::Models,
+                "words" => Page::Words,
+                "settings" => Page::Settings,
+                _ => Page::Stats,
+            };
+            let num = |i: usize, d: f32| args.get(i).and_then(|s| s.parse::<f32>().ok()).unwrap_or(d);
+            crate::ui::render_png(cfg, page, std::path::Path::new(&args[2]), num(3, 1200.0) as u32, num(4, 820.0) as u32, num(5, 1.0))
+        }
+        "--stats" | "--window" => {
+            let path = crate::config::path();
+            let cfg = crate::config::Shared::new(path.clone(), crate::config::load_or_create(&path));
+            use crate::ui::Page;
+            let page = match args.get(1).map(String::as_str) {
+                Some("overview") => Page::Overview,
+                Some("history") => Page::History,
+                Some("models") => Page::Models,
+                Some("words") => Page::Words,
+                Some("settings") => Page::Settings,
+                _ => Page::Stats,
+            };
+            crate::ui::run_standalone(cfg, page)
         }
         "--bench" if args.len() >= 2 => bench_asr(&args[1], &args[2..]),
         "--bench-cleanup" if args.len() >= 2 => bench_cleanup(&args[1], args.get(2).map(String::as_str)),

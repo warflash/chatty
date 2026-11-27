@@ -31,6 +31,8 @@ pub enum Cmd {
     Cancel,
     Config(Arc<Config>),
     Downloaded { id: &'static str, ok: bool },
+    /// Fetch a model without switching to it (from the Models page).
+    Download(&'static str),
     /// Load (or download) what the config selects.
     Warm,
 }
@@ -142,6 +144,13 @@ impl Pump {
         capture.drain(&mut self.raw);
         let start = self.pcm.len();
         self.resampler.process(&self.raw, &mut self.pcm);
+        if !flush && self.pcm.len() > start {
+            // Level meter for the overlay and window: RMS, roughly mapped
+            // so normal speech fills most of the range.
+            let new = &self.pcm[start..];
+            let rms = (new.iter().map(|s| s * s).sum::<f32>() / new.len() as f32).sqrt();
+            crate::status::set_level((rms * 6.0).sqrt().min(1.0));
+        }
         if flush {
             self.resampler.flush(&mut self.pcm);
         }
@@ -338,25 +347,163 @@ fn record_streaming(session: &mut Session, spec: &AsrModel, run: &RunOptions, p:
     })
 }
 
-fn record_offline(session: &mut Session, run: &RunOptions, preview_cancel: &CancelToken, p: Parts) -> Result<Outcome, String> {
+const VAD_FRAME: usize = 512;
+/// Segments are closed at a pause once they are at least this long...
+const MIN_SEGMENT: usize = audio::RATE as usize * 4;
+/// ...and forced closed at the quietest point beyond this.
+const MAX_SEGMENT: usize = audio::RATE as usize * 20;
+/// Pause that closes a segment: 10 frames = 320 ms without speech.
+const PAUSE_FRAMES: usize = 10;
+/// Speech up to this long gets one full-context final pass.
+const FULL_PASS_MAX: usize = audio::RATE as usize * 40;
+
+/// Speech range inside samples [a, b), padded, or None if it holds no speech.
+fn speech_in(probs: &[f32], threshold: f32, a: usize, b: usize) -> Option<(usize, usize)> {
+    let fa = a / VAD_FRAME;
+    let fb = b.div_ceil(VAD_FRAME).min(probs.len());
+    if fa >= fb {
+        return None;
+    }
+    let base = fa * VAD_FRAME;
+    analyze_speech(&probs[fa..fb], threshold, b - base).range.map(|(x, y)| (base + x, base + y))
+}
+
+/// Full-context transcription in segments.
+///
+/// While recording, the current segment is re-transcribed every
+/// `preview_interval_ms` over all of its audio, so the preview corrects
+/// itself as context arrives. At a pause (or after 20 s) the segment is
+/// finalized in the background and becomes fixed text. On release only the
+/// last segment still needs a pass. Every pass sees only the VAD-detected
+/// speech, so noise before the first word (mic start, button click) is not
+/// transcribed.
+/// Segment state for full-context decoding (shared with `chatty --bench`).
+#[derive(Default)]
+pub struct Segmenter {
+    pub committed: Vec<String>,
+    pub language: Option<String>,
+    seg_start: usize,
+    last_len: usize,
+    pub current: String,
+    pub compute_ms: f64,
+    /// Number of segments finalized while recording.
+    pub closed: usize,
+}
+
+impl Segmenter {
+    /// Committed text plus the live tail.
+    pub fn text(&self) -> String {
+        let mut t = self.committed.join(" ");
+        if !self.current.is_empty() {
+            if !t.is_empty() {
+                t.push(' ');
+            }
+            t.push_str(&self.current);
+        }
+        t
+    }
+
+    /// One recording tick: close the segment at a pause (or when it gets
+    /// long) and, when `preview_due`, re-transcribe the open segment.
+    /// Returns true when the visible text changed.
+    pub fn step(&mut self, session: &mut Session, run: &RunOptions, pcm: &[f32], probs: &[f32], thr: f32, preview_due: bool) -> bool {
+        let mut changed = false;
+        let frames = probs.len();
+        let seg_len = (frames * VAD_FRAME).saturating_sub(self.seg_start);
+        let paused = frames >= PAUSE_FRAMES && probs[frames - PAUSE_FRAMES..].iter().all(|p| *p < thr);
+        if seg_len >= MIN_SEGMENT && (paused || seg_len >= MAX_SEGMENT) {
+            let cut_frame = if paused {
+                frames - PAUSE_FRAMES / 2
+            } else {
+                let from = frames.saturating_sub(62).max(self.seg_start / VAD_FRAME + 1);
+                (from..frames).min_by(|a, b| probs[*a].total_cmp(&probs[*b])).unwrap_or(frames)
+            };
+            let cut = (cut_frame * VAD_FRAME).min(pcm.len());
+            match speech_in(probs, thr, self.seg_start, cut) {
+                Some((a, b)) => {
+                    let t = Instant::now();
+                    // An aborted run (key released) keeps the audio for the final pass.
+                    if let Ok(tr) = session.run(&pcm[a..b], run) {
+                        let text = tr.text.trim().to_string();
+                        if !text.is_empty() {
+                            self.committed.push(text);
+                        }
+                        self.language = tr.language.or(self.language.take());
+                        self.seg_start = cut;
+                        self.current.clear();
+                        self.closed += 1;
+                        changed = true;
+                    }
+                    self.compute_ms += ms(t.elapsed());
+                }
+                None => self.seg_start = cut,
+            }
+            self.last_len = 0;
+        }
+        if preview_due && pcm.len().saturating_sub(self.last_len) >= audio::RATE as usize / 5 {
+            if let Some((a, b)) = speech_in(probs, thr, self.seg_start, pcm.len()) {
+                let t = Instant::now();
+                if let Ok(tr) = session.run(&pcm[a..b], run) {
+                    let text = tr.text.trim().to_string();
+                    if text != self.current {
+                        self.current = text;
+                        changed = true;
+                    }
+                }
+                self.compute_ms += ms(t.elapsed());
+            }
+            self.last_len = pcm.len();
+        }
+        changed
+    }
+
+    /// The final pass. Up to `FULL_PASS_MAX` of speech it re-transcribes all
+    /// of it in one run: one context, so no sentence breaks at segment
+    /// boundaries (~5 ms per second of audio on a 3070). Longer recordings
+    /// keep the segments finalized while recording and only finish the last
+    /// one. Returns the compute time.
+    pub fn finish(&mut self, session: &mut Session, run: &RunOptions, pcm: &[f32], probs: &[f32], thr: f32) -> Result<f64, String> {
+        let t = Instant::now();
+        self.current.clear();
+        if let Some((a, b)) = speech_in(probs, thr, 0, pcm.len()).filter(|(a, b)| b - a <= FULL_PASS_MAX) {
+            let tr = session.run(&pcm[a..b], run).map_err(|e| format!("transcribe: {e}"))?;
+            self.committed = vec![tr.text.trim().to_string()];
+            self.committed.retain(|s| !s.is_empty());
+            self.language = tr.language.or(self.language.take());
+            let ms = ms(t.elapsed());
+            self.compute_ms += ms;
+            return Ok(ms);
+        }
+        if let Some((a, b)) = speech_in(probs, thr, self.seg_start, pcm.len()) {
+            let tr = session.run(&pcm[a..b], run).map_err(|e| format!("transcribe: {e}"))?;
+            let text = tr.text.trim().to_string();
+            if !text.is_empty() {
+                self.committed.push(text);
+            }
+            self.language = tr.language.or(self.language.take());
+        }
+        let ms = ms(t.elapsed());
+        self.compute_ms += ms;
+        Ok(ms)
+    }
+}
+
+fn record_segments(session: &mut Session, run: &RunOptions, preview_cancel: &CancelToken, p: Parts) -> Result<Outcome, String> {
     let Parts { rx, capture, audio, mut vad, pump, deferred, cfg } = p;
+    let thr = cfg.vad_threshold;
     let interval = Duration::from_millis(cfg.preview_interval_ms.max(100));
+    let mut seg = Segmenter::default();
     let mut last_preview = Instant::now();
-    let mut last_len = 0;
-    let mut compute = 0.0;
     let end = loop {
         if let Some(end) = wait(rx, TICK, deferred) {
             break end;
         }
         pump.pull(capture, vad.as_deref_mut(), false);
-        let grown = pump.pcm.len().saturating_sub(last_len) >= audio::RATE as usize / 5;
-        if last_preview.elapsed() >= interval && grown && pump.heard_speech(cfg.vad_threshold) {
-            let t = Instant::now();
-            if let Ok(tr) = session.run(&pump.pcm, run) {
-                overlay::live(tr.text.trim());
-            }
-            compute += ms(t.elapsed());
-            last_len = pump.pcm.len();
+        let due = last_preview.elapsed() >= interval;
+        if seg.step(session, run, &pump.pcm, &pump.vad_probs, thr, due) {
+            overlay::live(&seg.text());
+        }
+        if due {
             last_preview = Instant::now();
         }
     };
@@ -370,17 +517,15 @@ fn record_offline(session: &mut Session, run: &RunOptions, preview_cancel: &Canc
     audio.stop();
     pump.pull(capture, vad, true);
     let drained_at = Instant::now();
-    let speech = analyze_speech(&pump.vad_probs, cfg.vad_threshold, pump.pcm.len());
-    let Some((a, b)) = speech.range else {
-        return Ok(Outcome::Empty { released_at });
-    };
     preview_cancel.reset();
-    let t = Instant::now();
-    let tr = session.run(&pump.pcm[a..b], run).map_err(|e| format!("transcribe: {e}"))?;
-    let final_ms = ms(t.elapsed());
+    let final_ms = seg.finish(session, run, &pump.pcm, &pump.vad_probs, thr)?;
+    if seg.committed.is_empty() {
+        return Ok(Outcome::Empty { released_at });
+    }
+    log::info!("segments: {} closed while recording, final pass {final_ms:.0} ms", seg.closed);
     Ok(Outcome::Heard {
         released_at,
-        heard: Heard { text: tr.text, language: tr.language, final_ms, compute_ms: compute + final_ms },
+        heard: Heard { text: seg.committed.join(" "), language: seg.language, final_ms, compute_ms: seg.compute_ms },
         drained_at,
     })
 }
@@ -389,6 +534,8 @@ fn record_offline(session: &mut Session, run: &RunOptions, preview_cancel: &Canc
 struct Pasted {
     at: Option<Instant>,
     blocked: bool,
+    /// Not pasted: shown as a copy card (no text field had focus).
+    carded: bool,
     waited_ms: f64,
     paste_ms: f64,
 }
@@ -401,7 +548,17 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
         // text on the clipboard instead.
         crate::clipboard::set_text(text)?;
         overlay::notice("Elevated window: text is on the clipboard (Ctrl+V)");
-        return Ok(Pasted { at: None, blocked: true, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
+        return Ok(Pasted { at: None, blocked: true, carded: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
+    }
+    if cfg.check_focus {
+        let t = Instant::now();
+        let target = crate::input::focus_target();
+        log::info!("focus check in {:.1} ms: {target:?}", ms(t.elapsed()));
+        if let crate::input::Target::NotEditable(_) = target {
+            // Ctrl+V would go nowhere: keep the text one click away instead.
+            overlay::card(text);
+            return Ok(Pasted { at: None, blocked: false, carded: true, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
+        }
     }
     let saved = crate::clipboard::save().map_err(|e| log::warn!("clipboard save: {e}")).ok();
     let seq = crate::clipboard::set_text(text)?;
@@ -416,7 +573,7 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
             Ok(true) => {}
         }
     }
-    Ok(Pasted { at: Some(at), blocked: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
+    Ok(Pasted { at: Some(at), blocked: false, carded: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
 }
 
 impl Worker {
@@ -455,6 +612,12 @@ impl Worker {
                 Cmd::Finish { .. } | Cmd::Cancel => {}
                 Cmd::Config(new) => self.apply_config(&new),
                 Cmd::Warm => self.warm(),
+                Cmd::Download(id) => {
+                    let asset = models::asr(id).map(|m| &m.asset).or_else(|| models::cleanup(id).map(|m| &m.asset));
+                    if let Some(a) = asset {
+                        self.download(id, a);
+                    }
+                }
                 Cmd::Downloaded { id, ok } => {
                     self.downloading.remove(id);
                     if ok {
@@ -470,6 +633,7 @@ impl Worker {
     fn unload(&mut self, why: &str) {
         if self.asr.take().is_some() {
             log::info!("speech model unloaded ({why})");
+            crate::status::update(|s| s.loaded = None);
         }
         if self.cleaner.take().is_some() {
             log::info!("cleanup model unloaded ({why})");
@@ -499,10 +663,13 @@ impl Worker {
             .name("download".into())
             .spawn(move || {
                 let name = asset.file;
+                crate::status::set_download(name, Some(0.0));
                 let result = models::ensure(asset, |f| {
                     overlay::progress(&format!("Downloading {name}"), f);
+                    crate::status::set_download(name, Some(f));
                     tray::set_tooltip(&format!("chatty: downloading {name} {:.0}%", f * 100.0));
                 });
+                crate::status::set_download(name, None);
                 match &result {
                     Ok(_) => overlay::notice(&format!("Downloaded {name}")),
                     Err(e) => {
@@ -584,6 +751,8 @@ impl Worker {
         let load_ms = ms(t0.elapsed());
         log::info!("model {} loaded on {} in {:.0} ms (incl. warm-up)", spec.id, backend_name, load_ms);
         self.pending_load_ms = Some(load_ms);
+        let loaded_info = (spec.id.to_string(), backend_name.clone());
+        crate::status::update(|s| s.loaded = Some(loaded_info));
         self.asr = Some(Loaded { spec, _model: model, session, backend: backend_name, vocabulary });
         tray::set_state(TrayState::Idle);
         Ok(())
@@ -641,13 +810,13 @@ impl Worker {
             s
         });
         let parts = Parts { rx, capture, audio, vad: vad_session, pump: &mut pump, deferred, cfg: &cfg };
-        let outcome = if spec.is_streaming() {
+        let outcome = if spec.is_streaming() && cfg.decode == "stream" {
             loaded.session.clear_cancel_token();
             record_streaming(&mut loaded.session, spec, &run, parts)
         } else {
             preview_cancel.reset();
             loaded.session.set_cancel_token(preview_cancel);
-            record_offline(&mut loaded.session, &run, preview_cancel, parts)
+            record_segments(&mut loaded.session, &run, preview_cancel, parts)
         };
 
         let total_samples = pump.pcm.len();
@@ -754,6 +923,9 @@ impl Worker {
                 rec.paste_ms = p.paste_ms;
                 if p.blocked {
                     rec.status = "blocked";
+                }
+                if p.carded {
+                    rec.status = "card";
                 }
                 if let Some(at) = p.at {
                     rec.set_pasted(at);

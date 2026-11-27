@@ -104,8 +104,25 @@ struct FileSource {
 }
 
 impl FileSource {
+    /// `path` is a WAV, or a .txt playlist of WAVs (one per line) played in
+    /// turn, one per recording. All clips must share a sample rate.
     fn start(path: &str, producer: Arc<Mutex<rtrb::Producer<f32>>>, rate: Arc<AtomicU32>) -> Result<Self, String> {
-        let (pcm, r) = crate::wav::read(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+        let files: Vec<String> = if path.to_lowercase().ends_with(".txt") {
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("{path}: {e}"))?
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        } else {
+            vec![path.to_string()]
+        };
+        let mut clips = Vec::new();
+        for f in &files {
+            clips.push(crate::wav::read(std::path::Path::new(f)).map_err(|e| format!("{f}: {e}"))?);
+        }
+        let r = clips.first().map_or(16_000, |c| c.1);
         rate.store(r, Ordering::Release);
         let stop = Arc::new(AtomicBool::new(false));
         let restart = Arc::new(AtomicBool::new(true));
@@ -113,11 +130,15 @@ impl FileSource {
         std::thread::spawn(move || {
             let chunk = r as usize / 100;
             let mut pos = 0;
+            let mut clip = usize::MAX;
+            let mut pcm: &[f32] = &[];
             let mut next = Instant::now();
             while !s.load(Ordering::Relaxed) {
                 next += Duration::from_millis(10);
                 if rs.swap(false, Ordering::Relaxed) {
                     pos = 0;
+                    clip = clip.wrapping_add(1) % clips.len().max(1);
+                    pcm = clips.get(clip).map_or(&[][..], |c| &c.0[..]);
                 }
                 if CAPTURING.load(Ordering::Acquire) {
                     let end = (pos + chunk).min(pcm.len());

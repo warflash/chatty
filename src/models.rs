@@ -110,7 +110,7 @@ impl AsrModel {
 pub static ASR: &[AsrModel] = &[
     AsrModel {
         id: "parakeet-unified-en-0.6b",
-        name: "Parakeet Unified EN 0.6B (streaming)",
+        name: "Parakeet Unified EN 0.6B",
         asset: Asset {
             repo: "handy-computer/parakeet-unified-en-0.6b-gguf",
             revision: "843b1b175ace04f5a89d379c79e2518c0d065b25",
@@ -127,7 +127,7 @@ pub static ASR: &[AsrModel] = &[
     },
     AsrModel {
         id: "nemotron-3.5-asr-streaming-0.6b",
-        name: "Nemotron 3.5 ASR 0.6B (32 languages, streaming)",
+        name: "Nemotron 3.5 ASR 0.6B",
         asset: Asset {
             repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
             revision: "53ce288f69326b415aeef030cfcb02a08a8096dd",
@@ -147,7 +147,7 @@ pub static ASR: &[AsrModel] = &[
     },
     AsrModel {
         id: "voxtral-mini-4b-realtime-2602",
-        name: "Voxtral Mini 4B Realtime (multilingual, streaming, GPU)",
+        name: "Voxtral Mini 4B Realtime",
         asset: Asset {
             repo: "handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
             revision: "7fd3d424fc558edca2c53808578b0541ef52a81a",
@@ -163,7 +163,7 @@ pub static ASR: &[AsrModel] = &[
     },
     AsrModel {
         id: "parakeet-ultra",
-        name: "Parakeet Ultra (25 European languages)",
+        name: "Parakeet Ultra",
         asset: Asset {
             repo: "handy-computer/parakeet-ultra-gguf",
             revision: "a1539be1b849ea7463b88343e5277b373d0c4ea9",
@@ -181,7 +181,7 @@ pub static ASR: &[AsrModel] = &[
     },
     AsrModel {
         id: "cohere-transcribe-03-2026",
-        name: "Cohere Transcribe 2B (14 languages)",
+        name: "Cohere Transcribe 2B",
         asset: Asset {
             repo: "handy-computer/cohere-transcribe-03-2026-gguf",
             revision: "7353b6040bdc1be9e5a3823d99d5fe12afe88264",
@@ -196,7 +196,7 @@ pub static ASR: &[AsrModel] = &[
     },
     AsrModel {
         id: "qwen3-asr-1.7b",
-        name: "Qwen3-ASR 1.7B (30 languages, GPU)",
+        name: "Qwen3-ASR 1.7B",
         asset: Asset {
             repo: "handy-computer/Qwen3-ASR-1.7B-gguf",
             revision: "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f",
@@ -214,7 +214,7 @@ pub static ASR: &[AsrModel] = &[
     },
     AsrModel {
         id: "granite-speech-5.0-470m-turboctc",
-        name: "Granite Speech 5.0 470M TurboCTC (fastest English)",
+        name: "Granite Speech 5.0 TurboCTC",
         asset: Asset {
             repo: "handy-computer/granite-speech-5.0-470m-turboctc-gguf",
             revision: "0cf5be9f4bcd479989e6a24d142094d34d552daa",
@@ -299,6 +299,20 @@ pub fn asr(id: &str) -> Option<&'static AsrModel> {
 
 pub fn cleanup(id: &str) -> Option<&'static CleanupModel> {
     CLEANUP.iter().find(|m| m.id == id)
+}
+
+/// Removes a downloaded model file and its verification marker.
+pub fn delete(asset: &Asset) -> std::io::Result<()> {
+    let p = asset.path();
+    let _ = std::fs::remove_file(marker(&p));
+    match std::fs::remove_file(&p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => {
+            log::info!("deleted {}", asset.file);
+            crate::ui::notify();
+            Ok(())
+        }
+    }
 }
 
 fn agent() -> ureq::Agent {

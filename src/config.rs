@@ -110,6 +110,10 @@ pub struct Config {
     pub paste_delay_after_ms: u64,
     /// Live preview cadence for offline (non-streaming) models.
     pub preview_interval_ms: u64,
+    /// "segments": full-context passes (live-corrected preview, final pass
+    /// on release). "stream": the model's streaming decoder (lower load,
+    /// for CPU-only use).
+    pub decode: String,
     /// Silero VAD speech probability threshold.
     pub vad_threshold: f32,
     pub remove_fillers: bool,
@@ -121,6 +125,9 @@ pub struct Config {
     /// Your typing speed, for "time saved".
     pub typing_wpm: f32,
     pub autostart: bool,
+    /// Before pasting, ask UI Automation whether a text field has focus; if
+    /// clearly not, show the transcript with a Copy button instead.
+    pub check_focus: bool,
     pub overlay: bool,
 }
 
@@ -136,7 +143,8 @@ impl Default for Config {
             mic_keep_open_secs: 120,
             paste_delay_before_ms: 60,
             paste_delay_after_ms: 60,
-            preview_interval_ms: 400,
+            preview_interval_ms: 300,
+            decode: "segments".into(),
             vad_threshold: 0.5,
             remove_fillers: true,
             filler_words: FillerWords::default(),
@@ -145,6 +153,7 @@ impl Default for Config {
             history_size: 20,
             typing_wpm: 45.0,
             autostart: true,
+            check_focus: true,
             overlay: true,
         }
     }
@@ -221,8 +230,12 @@ mic_keep_open_secs = {mic_keep}
 paste_delay_before_ms = {before}
 paste_delay_after_ms = {after}
 
-# Live preview refresh for models that do not stream.
+# How often the live preview is re-transcribed (it corrects itself as you speak).
 preview_interval_ms = {preview}
+# "segments": every pass sees the whole sentence; the pasted text comes from
+# a final pass over your speech. "stream": the model's streaming decoder
+# (cheaper, for CPU-only machines).
+decode = "segments"
 # Silero VAD speech threshold (0..1).
 vad_threshold = {vad}
 
@@ -241,6 +254,9 @@ history_size = {history}
 typing_wpm = {wpm}
 autostart = true
 overlay = true
+# Before pasting, check that a text field has focus; if clearly not, the
+# transcript waits at the bottom of the screen with a Copy button.
+check_focus = true
 
 [filler_words]
 any = ["uh", "uhm", "uhh", "hmm", "mmm", "ehm"]
