@@ -49,7 +49,8 @@ fn bench_asr(wav: &str, ids: &[String]) -> Result<(), String> {
         let model = Model::load_with(&path, &ModelOptions::default()).map_err(|e| e.to_string())?;
         let mut session = model.session().map_err(|e| e.to_string())?;
         let load = ms(t);
-        let run = RunOptions { language: spec.language_arg("auto"), ..Default::default() };
+        let lang = std::env::var("CHATTY_BENCH_LANG").unwrap_or_else(|_| "auto".into());
+        let run = RunOptions { language: spec.language_arg(&lang), ..Default::default() };
         // The engine's warm-up, then the first real run.
         let t = Instant::now();
         crate::engine::warm_up(&mut session, spec, &run);

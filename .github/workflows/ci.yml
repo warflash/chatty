@@ -33,12 +33,14 @@ jobs:
           # link-search dirs inside target/ on PATH, so add the DLLs here.
           Add-Content $env:GITHUB_PATH "$PWD\native\transcribe\bin"
 
+      # Release first; the release-profile tests then reuse every dependency.
+      - name: Build release
+        timeout-minutes: 15
+        run: cargo build --release --locked
+
       - name: Test
         timeout-minutes: 10
-        run: cargo test --locked
-
-      - name: Build release
-        run: cargo build --release --locked
+        run: cargo test --release --locked
 
       - name: Package
         shell: pwsh

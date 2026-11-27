@@ -45,13 +45,11 @@ windows = { version = "0.62", features = [
 ] }
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
+# Thin LTO keeps codegen parallel: a clean build fits in CI's 5-minute
+# budget, where fat LTO with one codegen unit serializes the final crate.
+lto = "thin"
+codegen-units = 16
 opt-level = 3
 strip = true
 panic = "unwind"
-
-# Debug builds stay fast to link but keep the audio/resampler path usable.
-[profile.dev.package."*"]
-opt-level = 2
 

@@ -44,7 +44,9 @@ fn marker(p: &std::path::Path) -> PathBuf {
 pub enum Lang {
     /// Bare codes ("en", "de"); `None` auto-detects or is ignored.
     Bare,
-    /// Locales ("en-US", "de-DE") and required; "auto" detects.
+    /// Locales ("en-US", "de-DE"). No language selects the model's auto
+    /// slot; the literal "auto" is rejected by transcribe.cpp 0.5.1 (its
+    /// language check runs before the family sees it).
     Locale,
 }
 
@@ -81,7 +83,7 @@ impl AsrModel {
         match self.lang {
             Lang::Locale => {
                 if auto {
-                    return Some("auto".into());
+                    return None;
                 }
                 let base = configured.split(['-', '_']).next().unwrap_or(configured);
                 self.languages
@@ -89,7 +91,6 @@ impl AsrModel {
                     .find(|l| l.eq_ignore_ascii_case(configured))
                     .or_else(|| self.languages.iter().find(|l| l.split('-').next() == Some(base)))
                     .map(|l| l.to_string())
-                    .or(Some("auto".into()))
             }
             Lang::Bare => {
                 if auto || self.languages.len() == 1 {
@@ -142,7 +143,7 @@ pub static ASR: &[AsrModel] = &[
         lang: Lang::Locale,
         // att_context_right 6 = 480 ms lookahead; 13 is byte-equal to offline.
         streaming: Streaming::CacheAware { att_right: 6 },
-        note: "needs a locale or auto; auto strips <lang> tags",
+        note: "locale or none (auto); auto strips <lang> tags",
     },
     AsrModel {
         id: "voxtral-mini-4b-realtime-2602",
@@ -375,7 +376,8 @@ mod tests {
         let parakeet = asr("parakeet-unified-en-0.6b").unwrap();
         assert_eq!(parakeet.language_arg("de"), None);
         let nemo = asr("nemotron-3.5-asr-streaming-0.6b").unwrap();
-        assert_eq!(nemo.language_arg("auto").as_deref(), Some("auto"));
+        assert_eq!(nemo.language_arg("auto"), None);
+        assert_eq!(nemo.language_arg("xx"), None);
         assert_eq!(nemo.language_arg("de").as_deref(), Some("de-DE"));
         assert_eq!(nemo.language_arg("en-GB").as_deref(), Some("en-GB"));
         let ultra = asr("parakeet-ultra").unwrap();

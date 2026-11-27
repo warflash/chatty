@@ -38,8 +38,9 @@ use tray::TrayState;
 fn set_autostart(enabled: bool) {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW};
     let key = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    // Never register a dev build.
-    if cfg!(debug_assertions) {
+    // Never register a dev build, or a release build run from cargo's target dir.
+    let exe = std::env::current_exe().unwrap_or_default();
+    if cfg!(debug_assertions) || exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")) {
         return;
     }
     unsafe {
