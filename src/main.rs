@@ -190,6 +190,10 @@ fn main() {
                 set_autostart(new.autostart);
             }
             overlay::ENABLED.store(new.overlay, std::sync::atomic::Ordering::Relaxed);
+            if old.font != new.font {
+                ui::gfx::set_font(&new.font);
+                ui::notify();
+            }
             if old.mouse_button != new.mouse_button {
                 logi::set_enabled(new.mouse_button);
             }

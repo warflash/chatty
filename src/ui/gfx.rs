@@ -106,6 +106,88 @@ struct FormatKey {
     align: Align,
 }
 
+/// The user's text font: empty (Segoe UI Variable), an installed family
+/// name, or a path to a .ttf / .otf file. Bumping the generation makes
+/// every Gfx rebuild its text formats.
+static FONT_SPEC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static FONT_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_font(spec: &str) {
+    let mut s = FONT_SPEC.lock().unwrap();
+    if *s != spec.trim() {
+        *s = spec.trim().to_string();
+        FONT_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Installed font family names, sorted.
+pub fn system_families() -> Vec<String> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(dw) = DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) else { return out };
+        let mut coll: Option<IDWriteFontCollection> = None;
+        if dw.GetSystemFontCollection(&mut coll, false).is_err() {
+            return out;
+        }
+        let Some(coll) = coll else { return out };
+        for i in 0..coll.GetFontFamilyCount() {
+            if let Some(name) = coll.GetFontFamily(i).ok().and_then(|f| f.GetFamilyNames().ok()).and_then(|n| english(&n)) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort_by_key(|a| a.to_lowercase());
+    out.dedup();
+    out
+}
+
+unsafe fn english(names: &IDWriteLocalizedStrings) -> Option<String> {
+    unsafe {
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        let _ = names.FindLocaleName(w!("en-us"), &mut index, &mut exists);
+        if !exists.as_bool() {
+            index = 0;
+        }
+        let len = names.GetStringLength(index).ok()?;
+        let mut buf = vec![0u16; len as usize + 1];
+        names.GetString(index, &mut buf).ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Family name and (for font files) the private collection holding it.
+fn resolve_font(dw: &IDWriteFactory, spec: &str) -> Option<(HSTRING, Option<IDWriteFontCollection>)> {
+    if spec.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(spec);
+    let is_file = path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_lowercase().as_str(), "ttf" | "otf" | "ttc"));
+    if !is_file {
+        return Some((HSTRING::from(spec), None));
+    }
+    let loaded = unsafe {
+        (|| -> windows::core::Result<(HSTRING, IDWriteFontCollection)> {
+            let f5: IDWriteFactory5 = dw.cast()?;
+            let file = f5.CreateFontFileReference(&HSTRING::from(path.as_os_str()), None)?;
+            let builder = f5.CreateFontSetBuilder()?;
+            builder.AddFontFile(&file)?;
+            let set = builder.CreateFontSet()?;
+            let coll = f5.CreateFontCollectionFromFontSet(&set)?;
+            let names = coll.GetFontFamily(0)?.GetFamilyNames()?;
+            let name = english(&names).unwrap_or_default();
+            Ok((HSTRING::from(name), coll.cast()?))
+        })()
+    };
+    match loaded {
+        Ok((name, coll)) => Some((name, Some(coll))),
+        Err(e) => {
+            log::warn!("font {spec}: {e}");
+            None
+        }
+    }
+}
+
 pub struct Gfx {
     pub rt: ID2D1RenderTarget,
     hwnd_rt: Option<ID2D1HwndRenderTarget>,
@@ -113,6 +195,8 @@ pub struct Gfx {
     dw: IDWriteFactory,
     formats: HashMap<FormatKey, IDWriteTextFormat>,
     icon_family: HSTRING,
+    font_gen: u32,
+    custom: Option<(HSTRING, Option<IDWriteFontCollection>)>,
     pub dpi: f32,
 }
 
@@ -167,7 +251,7 @@ impl Gfx {
                     }
                 }
             }
-            Ok(Gfx { rt, hwnd_rt: None, brush, dw, formats: HashMap::new(), icon_family, dpi })
+            Ok(Gfx { rt, hwnd_rt: None, brush, dw, formats: HashMap::new(), icon_family, font_gen: u32::MAX, custom: None, dpi })
         }
     }
 
@@ -234,17 +318,27 @@ impl Gfx {
     }
 
     fn format(&mut self, font: Font, wrap: bool, align: Align) -> IDWriteTextFormat {
+        let generation = FONT_GEN.load(std::sync::atomic::Ordering::Relaxed);
+        if generation != self.font_gen {
+            self.font_gen = generation;
+            self.formats.clear();
+            let spec = FONT_SPEC.lock().unwrap().clone();
+            self.custom = resolve_font(&self.dw, &spec);
+        }
         let key = FormatKey { size10: (font.size * 10.0) as u32, weight: font.weight, family: font.family, wrap, align };
         if let Some(f) = self.formats.get(&key) {
             return f.clone();
         }
         unsafe {
-            let family = text_family_name(font.family, &self.icon_family);
+            let (family, collection) = match (&self.custom, font.family) {
+                (Some((name, coll)), Family::Text | Family::Display) => (name.clone(), coll.clone()),
+                _ => (text_family_name(font.family, &self.icon_family), None),
+            };
             let f = self
                 .dw
                 .CreateTextFormat(
                     &family,
-                    None,
+                    collection.as_ref(),
                     DWRITE_FONT_WEIGHT(font.weight as i32),
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,

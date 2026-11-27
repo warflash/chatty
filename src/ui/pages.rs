@@ -1027,6 +1027,13 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "check_focus",
         cfg.check_focus,
     );
+    let r = row(ui, c, "Font", "Installed fonts, or .ttf files in %LOCALAPPDATA%\chatty\fonts", 320.0);
+    let fonts = font_options(&cfg.font);
+    let labels: Vec<String> = fonts.iter().map(|(l, _)| l.clone()).collect();
+    let selected = fonts.iter().position(|(_, v)| v == &cfg.font).unwrap_or(0);
+    if let Some(i) = ui.select("set/font", &labels, selected, r) {
+        set(ui, "font", fonts[i].1.clone());
+    }
     toggle_row(ui, c, "Press Enter after pasting", "Sends the message right away", "auto_enter", cfg.auto_enter);
     if !cfg.auto_enter {
         toggle_row(
@@ -1127,4 +1134,30 @@ fn ctx_path(i: usize) -> std::path::PathBuf {
         1 => crate::paths::log_path(),
         _ => crate::paths::local_dir(),
     }
+}
+
+/// (label, config value): the default, font files from the `fonts`
+/// folders (next to chatty.exe and in %LOCALAPPDATA%\chatty), the
+/// installed families, and the configured font if it is none of those.
+fn font_options(current: &str) -> Vec<(String, String)> {
+    static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let mut out = vec![("Segoe UI Variable (default)".to_string(), String::new())];
+    for dir in [crate::paths::exe_dir().join("fonts"), crate::paths::local_dir().join("fonts")] {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let mut files: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_lowercase().as_str(), "ttf" | "otf")))
+            .collect();
+        files.sort();
+        for f in files {
+            let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            out.push((format!("{stem} (file)"), f.to_string_lossy().into_owned()));
+        }
+    }
+    out.extend(FAMILIES.get_or_init(super::gfx::system_families).iter().map(|f| (f.clone(), f.clone())));
+    if !current.is_empty() && !out.iter().any(|(_, v)| v == current) {
+        out.insert(1, (current.to_string(), current.to_string()));
+    }
+    out
 }

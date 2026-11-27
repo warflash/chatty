@@ -136,6 +136,9 @@ pub struct Config {
     /// Without auto_enter: put a space after the pasted text so the next
     /// dictation doesn't run into it.
     pub trailing_space: bool,
+    /// Text font for the overlay and window: empty for Segoe UI Variable,
+    /// an installed family name, or a path to a .ttf / .otf file.
+    pub font: String,
     pub overlay: bool,
 }
 
@@ -165,6 +168,7 @@ impl Default for Config {
             mouse_button: true,
             auto_enter: false,
             trailing_space: true,
+            font: String::new(),
             overlay: true,
         }
     }
@@ -276,6 +280,9 @@ auto_enter = false
 # Without auto_enter: add a space after the text so the next dictation
 # doesn't run into it.
 trailing_space = true
+# Font for the overlay and window: "" (Segoe UI Variable), an installed
+# family like "Inter", or a path to a .ttf file.
+font = ""
 
 [filler_words]
 any = ["uh", "uhm", "uhh", "hmm", "mmm", "ehm"]

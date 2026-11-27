@@ -105,6 +105,9 @@ const WM_STATS: u32 = WM_APP + 31;
 const TIMER_ANIM: usize = 1;
 
 pub fn init(cfg: config::Shared, engine: Option<crate::engine::Handle>) {
+    // CHATTY_FONT overrides the setting (previews).
+    let font = std::env::var("CHATTY_FONT").unwrap_or_else(|_| cfg.get().font.clone());
+    gfx::set_font(&font);
     let _ = CTX.set(Ctx { cfg, engine });
 }
 
@@ -167,6 +170,8 @@ struct Popup {
     anchor: Rect,
     options: Vec<String>,
     selected: usize,
+    /// Scroll offset for long lists (DIPs); None until first drawn.
+    scroll: Option<f32>,
 }
 
 #[derive(Default)]
@@ -375,7 +380,7 @@ impl Ui<'_> {
         self.icon(icon::CHEVRON_DOWN, Rect::new(r.right() - 32.0, r.y, 24.0, r.h), 10.0, theme::TEXT2);
         if clicked {
             // The popup is drawn in screen coordinates at the end of the frame.
-            self.mem.popup = Some(Popup { id: k, anchor: r, options: options.to_vec(), selected });
+            self.mem.popup = Some(Popup { id: k, anchor: r, options: options.to_vec(), selected, scroll: None });
         }
         None
     }
@@ -617,6 +622,10 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
     // Smooth scrolling.
     if app.input.wheel != 0.0 && app.mem.popup.is_none() {
         app.scroll_target -= app.input.wheel * 1.2;
+    } else if app.input.wheel != 0.0 {
+        if let Some(p) = app.mem.popup.as_mut() {
+            p.scroll = Some(p.scroll.unwrap_or(0.0) - app.input.wheel * 1.2);
+        }
     }
     let max_scroll = (app.content_h - app.viewport_h).max(0.0);
     app.scroll_target = app.scroll_target.clamp(0.0, max_scroll);
@@ -795,7 +804,7 @@ fn popup(ui: &mut Ui, w: f32, h: f32) {
         return;
     };
     let row = 34.0;
-    let ph = (p.options.len() as f32 * row + 8.0).min(h - 40.0);
+    let ph = (p.options.len() as f32 * row + 8.0).min(h - 40.0).min(420.0);
     let mut y = p.anchor.bottom() + 4.0;
     if y + ph > h - 8.0 {
         y = (p.anchor.y - ph - 4.0).max(8.0);
@@ -805,11 +814,18 @@ fn popup(ui: &mut Ui, w: f32, h: f32) {
     ui.g.fill(r, 10.0, Color::rgb(32, 32, 38));
     ui.g.stroke(r, 10.0, Color::white(0.10), 1.0);
     ui.mem.popup_rect = Some(r);
+    // Long lists scroll; they open with the selection in view.
+    let max_scroll = (p.options.len() as f32 * row + 8.0 - ph).max(0.0);
+    let scroll = p.scroll.unwrap_or((p.selected as f32 * row - ph / 2.0 + row).max(0.0)).clamp(0.0, max_scroll);
+    if let Some(m) = ui.mem.popup.as_mut() {
+        m.scroll = Some(scroll);
+    }
+    ui.g.push_clip(r.inset(1.0, 4.0));
     let mut chosen = None;
     for (i, o) in p.options.iter().enumerate() {
-        let rr = Rect::new(r.x + 4.0, r.y + 4.0 + i as f32 * row, r.w - 8.0, row - 2.0);
-        if rr.bottom() > r.bottom() {
-            break;
+        let rr = Rect::new(r.x + 4.0, r.y + 4.0 + i as f32 * row - scroll, r.w - 8.0, row - 2.0);
+        if rr.bottom() < r.y || rr.y > r.bottom() {
+            continue;
         }
         let (hover, _, clicked) = ui.interact(id(&format!("popup/{i}")), rr);
         if hover || i == p.selected {
@@ -819,9 +835,16 @@ fn popup(ui: &mut Ui, w: f32, h: f32) {
             ui.g.fill(Rect::new(rr.x, rr.y + 9.0, 3.0, rr.h - 18.0), 1.5, theme::ACCENT);
         }
         ui.g.label(o, Font::text(13.0), Rect::new(rr.x + 14.0, rr.y, rr.w - 20.0, rr.h), theme::TEXT, Align::Left);
-        if clicked {
+        if clicked && r.contains(ui.input.mouse) {
             chosen = Some(i);
         }
+    }
+    ui.g.pop_clip();
+    if max_scroll > 0.0 {
+        let track = r.h - 16.0;
+        let thumb = (track * ph / (max_scroll + ph)).max(24.0);
+        let ty = r.y + 8.0 + (track - thumb) * (scroll / max_scroll);
+        ui.g.fill(Rect::new(r.right() - 6.0, ty, 3.0, thumb), 1.5, Color::white(0.18));
     }
     if let Some(i) = chosen {
         ui.mem.chosen = Some((p.id, i));

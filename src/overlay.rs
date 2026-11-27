@@ -963,6 +963,9 @@ pub fn render_png(kind: &str, path: &std::path::Path, scale: f32) -> Result<(), 
         ),
     };
     let frame = Frame { mode, live, split, level, elapsed, t: 1.3, hover };
+    if let Ok(f) = std::env::var("CHATTY_FONT") {
+        crate::ui::gfx::set_font(&f);
+    }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(e)?;
