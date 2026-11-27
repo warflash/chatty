@@ -21,6 +21,8 @@ toml_edit = "0.25.21"
 ureq = { version = "3.5.2", default-features = false, features = ["native-tls"] }
 windows = { version = "0.62", features = [
     "Foundation_Numerics",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
@@ -30,6 +32,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Imaging",
     "Win32_Graphics_Imaging_D2D",
     "Win32_System_Com",
+    "Win32_System_IO",
     "Win32_Media_Audio",
     "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_Console",

@@ -11,6 +11,7 @@ mod hook;
 mod input;
 mod llama;
 mod logger;
+mod logi;
 mod models;
 mod overlay;
 mod paths;
@@ -169,6 +170,7 @@ fn main() {
     let (audio_ctl, capture) = audio::spawn();
     let (coord_tx, coord_rx) = mpsc::channel::<KeyEvent>();
     let engine = engine::spawn(cfg.clone(), coord_tx.clone(), stats.clone(), audio_ctl.clone(), capture);
+    logi::start(coord_tx.clone(), cfg.get().mouse_button);
     hook::start(coord_tx);
     {
         let (engine, cfg, stats) = (engine.clone(), cfg.clone(), stats.clone());
@@ -188,6 +190,9 @@ fn main() {
                 set_autostart(new.autostart);
             }
             overlay::ENABLED.store(new.overlay, std::sync::atomic::Ordering::Relaxed);
+            if old.mouse_button != new.mouse_button {
+                logi::set_enabled(new.mouse_button);
+            }
             engine.send(engine::Cmd::Config(std::sync::Arc::new(new.clone())));
             tray::set_tooltip("");
         });
@@ -209,5 +214,7 @@ fn main() {
             DispatchMessageW(&msg);
         }
     }
+    logi::shutdown();
+    overlay::shutdown();
     tray::remove_icon();
 }

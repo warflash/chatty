@@ -128,6 +128,9 @@ pub struct Config {
     /// Before pasting, ask UI Automation whether a text field has focus; if
     /// clearly not, show the transcript with a Copy button instead.
     pub check_focus: bool,
+    /// Use the top button of a Logitech mouse (MX Vertical) as the trigger,
+    /// diverted over HID++ while chatty runs.
+    pub mouse_button: bool,
     pub overlay: bool,
 }
 
@@ -154,6 +157,7 @@ impl Default for Config {
             typing_wpm: 45.0,
             autostart: true,
             check_focus: true,
+            mouse_button: true,
             overlay: true,
         }
     }
@@ -257,6 +261,9 @@ overlay = true
 # Before pasting, check that a text field has focus; if clearly not, the
 # transcript waits at the bottom of the screen with a Copy button.
 check_focus = true
+# Logitech mice: the top button (MX Vertical's DPI switch) works like the
+# trigger while chatty runs. No Logitech software needed.
+mouse_button = true
 
 [filler_words]
 any = ["uh", "uhm", "uhh", "hmm", "mmm", "ehm"]

@@ -1027,6 +1027,14 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "check_focus",
         cfg.check_focus,
     );
+    toggle_row(
+        ui,
+        c,
+        "Logitech top button",
+        "The top button of a Logitech mouse (MX Vertical) works like the trigger, no Logitech software needed",
+        "mouse_button",
+        cfg.mouse_button,
+    );
     let r = row(ui, c, "Transcription", "Full context re-reads the whole sentence (more accurate); streaming is lighter on CPU", 300.0);
     let modes = ["segments", "stream"];
     let mi = modes.iter().position(|m| *m == cfg.decode).unwrap_or(0);

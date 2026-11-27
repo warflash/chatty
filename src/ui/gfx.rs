@@ -285,6 +285,37 @@ impl Gfx {
         (m.widthIncludingTrailingWhitespace, m.height)
     }
 
+    /// (line count, height) of wrapped `s`.
+    pub fn wrapped(&mut self, s: &str, font: Font, max_w: f32) -> (u32, f32) {
+        let l = self.layout(s, font, max_w, true, Align::Left);
+        let mut m = DWRITE_TEXT_METRICS::default();
+        unsafe {
+            let _ = l.GetMetrics(&mut m);
+        }
+        (m.lineCount, m.height)
+    }
+
+    /// Horizontal gradient fill.
+    pub fn hgradient(&self, r: Rect, radius: f32, left: Color, right: Color) {
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: left.d2d() },
+                D2D1_GRADIENT_STOP { position: 1.0, color: right.d2d() },
+            ];
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 { X: r.x, Y: r.y },
+                endPoint: Vector2 { X: r.right(), Y: r.y },
+            };
+            let Ok(b) = self.rt.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            if radius > 0.0 {
+                self.rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: radius, radiusY: radius }, &b);
+            } else {
+                self.rt.FillRectangle(&r.d2d(), &b);
+            }
+        }
+    }
+
     fn set(&self, c: Color) {
         unsafe { self.brush.SetColor(&c.d2d()) };
     }
@@ -376,6 +407,53 @@ impl Gfx {
             let _ = l.HitTestTextPosition(pos as u32, false, &mut x, &mut y, &mut m);
         }
         x
+    }
+
+    /// Clips to `r` and fades content out over `top` DIPs at the top and
+    /// `bottom` DIPs at the bottom (an opacity-mask layer). Pair with
+    /// `pop_fade`.
+    pub fn push_fade(&self, r: Rect, top: f32, bottom: f32) {
+        unsafe {
+            let h = r.h.max(1.0);
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: Color::white(if top > 0.0 { 0.0 } else { 1.0 }).d2d() },
+                D2D1_GRADIENT_STOP { position: (top / h).clamp(0.0, 1.0), color: Color::white(1.0).d2d() },
+                D2D1_GRADIENT_STOP { position: (1.0 - bottom / h).clamp(0.0, 1.0), color: Color::white(1.0).d2d() },
+                D2D1_GRADIENT_STOP { position: 1.0, color: Color::white(if bottom > 0.0 { 0.0 } else { 1.0 }).d2d() },
+            ];
+            let brush = self
+                .rt
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                .and_then(|coll| {
+                    let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 { X: r.x, Y: r.y },
+                        endPoint: Vector2 { X: r.x, Y: r.bottom() },
+                    };
+                    self.rt.CreateLinearGradientBrush(&props, None, &coll)
+                })
+                .ok()
+                .and_then(|b| b.cast::<ID2D1Brush>().ok());
+            let Ok(layer) = self.rt.CreateLayer(None) else {
+                self.push_clip(r);
+                return;
+            };
+            let params = D2D1_LAYER_PARAMETERS {
+                contentBounds: r.d2d(),
+                geometricMask: std::mem::ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: windows_numerics::Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: std::mem::ManuallyDrop::new(brush),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            self.rt.PushLayer(&params, &layer);
+            // The layer holds its own references.
+            let _ = std::mem::ManuallyDrop::into_inner(params.opacityBrush);
+        }
+    }
+
+    pub fn pop_fade(&self) {
+        unsafe { self.rt.PopLayer() };
     }
 
     pub fn push_clip(&self, r: Rect) {

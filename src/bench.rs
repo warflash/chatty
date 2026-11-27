@@ -289,6 +289,12 @@ pub fn main(args: &[String]) -> i32 {
             crate::ui::run_standalone(cfg, page)
         }
         "--clipboard-test" => clipboard_test(),
+        "--overlay-test" => crate::overlay::selftest(),
+        "--render-overlay" if args.len() >= 3 => crate::overlay::render_png(
+            &args[1],
+            std::path::Path::new(&args[2]),
+            args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.5),
+        ),
         "--bench" if args.len() >= 2 => bench_asr(&args[1], &args[2..]),
         "--bench-cleanup" if args.len() >= 2 => bench_cleanup(&args[1], args.get(2).map(String::as_str)),
         "--download" if args.len() >= 2 => {

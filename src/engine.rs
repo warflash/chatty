@@ -559,7 +559,7 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
         log::info!("focus check in {:.1} ms: {target:?}", ms(t.elapsed()));
         if let crate::input::Target::NotEditable(_) = target {
             // Ctrl+V would go nowhere: keep the text one click away instead.
-            overlay::card(text);
+            overlay::card(text, "Not pasted · no text field had focus");
             return Ok(Pasted { at: None, blocked: false, carded: true, unconfirmed: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) });
         }
     }
@@ -596,7 +596,7 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
             log::warn!(
                 "paste not confirmed: no app read the clipboard within {PASTE_CONFIRM_MS} ms of Ctrl+V (refused as monitors: {refused:?})"
             );
-            overlay::card(text);
+            overlay::card(text, "Not pasted · the app didn't take it (it's on the clipboard)");
             Ok(Pasted { at: None, blocked: false, carded: true, unconfirmed: true, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
         }
     }
