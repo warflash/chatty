@@ -1027,7 +1027,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "check_focus",
         cfg.check_focus,
     );
-    let r = row(ui, c, "Font", "Installed fonts, or .ttf files in %LOCALAPPDATA%\chatty\fonts", 320.0);
+    let r = row(ui, c, "Font", r"Installed fonts, or .ttf files in %LOCALAPPDATA%\chatty\fonts", 320.0);
     let fonts = font_options(&cfg.font);
     let labels: Vec<String> = fonts.iter().map(|(l, _)| l.clone()).collect();
     let selected = fonts.iter().position(|(_, v)| v == &cfg.font).unwrap_or(0);
