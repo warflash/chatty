@@ -26,6 +26,11 @@ use crate::text;
 use crate::tray::{self, TrayState};
 
 pub enum Cmd {
+    /// Key-down: start the microphone now so the recording includes what
+    /// was said during the hold threshold.
+    Prepare { pressed_at: Instant },
+    /// The key-down was a tap or was cancelled: stop and drop its audio.
+    Unprepare,
     Begin { pressed_at: Instant, started_at: Instant },
     Finish { released_at: Instant },
     Cancel,
@@ -75,6 +80,8 @@ struct Worker {
     last_used: Instant,
     /// Model load time to attribute to the next dictation (cold start).
     pending_load_ms: Option<f64>,
+    /// Capture started at key-down: (key-down, mic info, mic ready).
+    prepared: Option<(Instant, audio::StartInfo, Instant)>,
 }
 
 pub fn spawn(
@@ -105,6 +112,7 @@ pub fn spawn(
                 downloading: HashSet::new(),
                 last_used: Instant::now(),
                 pending_load_ms: None,
+                prepared: None,
             };
             w.run();
         })
@@ -190,7 +198,7 @@ pub fn analyze_speech(probs: &[f32], threshold: f32, total_samples: usize) -> Sp
     // Fewer than three speech frames (~100 ms) is a click or a breath.
     let range = match (first, last) {
         (Some(a), Some(b)) if speech_frames >= 3 => {
-            let pad_before = 200 * audio::RATE as usize / 1000;
+            let pad_before = 400 * audio::RATE as usize / 1000;
             let pad_after = 300 * audio::RATE as usize / 1000;
             Some(((a * FRAME).saturating_sub(pad_before), ((b + 1) * FRAME + pad_after).min(total_samples)))
         }
@@ -679,6 +687,23 @@ impl Worker {
                 }
             };
             match cmd {
+                Cmd::Prepare { pressed_at } => {
+                    if self.prepared.is_none() {
+                        let cfg = self.cfg.get();
+                        self.capture.discard();
+                        match self.audio.start(&cfg.microphone, Duration::from_secs(cfg.mic_keep_open_secs)) {
+                            Ok(info) => self.prepared = Some((pressed_at, info, Instant::now())),
+                            // Begin retries and reports it.
+                            Err(e) => log::warn!("microphone at key-down: {e}"),
+                        }
+                    }
+                }
+                Cmd::Unprepare => {
+                    if self.prepared.take().is_some() {
+                        self.audio.stop();
+                        self.capture.discard();
+                    }
+                }
                 Cmd::Begin { pressed_at, started_at } => {
                     self.dictate(pressed_at, started_at, &mut deferred);
                     self.last_used = Instant::now();
@@ -845,12 +870,17 @@ impl Worker {
 
     fn dictate(&mut self, pressed_at: Instant, started_at: Instant, deferred: &mut Vec<Cmd>) {
         let cfg = self.cfg.get();
-        self.capture.discard();
-        let mic = match self.audio.start(&cfg.microphone, Duration::from_secs(cfg.mic_keep_open_secs)) {
-            Ok(m) => m,
-            Err(e) => return self.fail_start(&e),
+        // Captured since key-down already? Then keep that audio.
+        let (mic, mic_ready) = match self.prepared.take() {
+            Some((at, info, ready)) if at == pressed_at => (info, ready),
+            _ => {
+                self.capture.discard();
+                match self.audio.start(&cfg.microphone, Duration::from_secs(cfg.mic_keep_open_secs)) {
+                    Ok(m) => (m, Instant::now()),
+                    Err(e) => return self.fail_start(&e),
+                }
+            }
         };
-        let mic_ready = Instant::now();
         overlay::live("", "");
         // Loads while the microphone already buffers into the ring.
         if let Err(e) = self.ensure_asr(&cfg) {

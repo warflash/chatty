@@ -93,6 +93,8 @@ fn coordinate(rx: Receiver<KeyEvent>, engine: engine::Handle, cfg: config::Share
         hook::ESCAPE_WANTED.store(m.wants_escape(), std::sync::atomic::Ordering::Relaxed);
         match effect {
             None => {}
+            Some(Effect::Arm { pressed_at }) => engine.send(engine::Cmd::Prepare { pressed_at }),
+            Some(Effect::Disarm) => engine.send(engine::Cmd::Unprepare),
             Some(Effect::Start { pressed_at }) => {
                 let now = Instant::now();
                 log::info!("recording (threshold reached {:?} after key-down)", now - pressed_at);
@@ -114,6 +116,7 @@ fn coordinate(rx: Receiver<KeyEvent>, engine: engine::Handle, cfg: config::Share
                 log::info!("cancelled");
             }
             Some(Effect::Submit { released_at }) => {
+                engine.send(engine::Cmd::Unprepare);
                 let waited = input::wait_trigger_released(Duration::from_secs(1));
                 let app = input::foreground_app();
                 let result = input::enter();

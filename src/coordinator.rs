@@ -4,8 +4,10 @@
 //! carry, so tests drive it with a synthetic clock. The coordinator thread
 //! (`run`) transports events to it and executes the returned effects.
 //!
-//! * Hold >= threshold: recording starts *at* the threshold (a tap never opens
-//!   the microphone); the release stops it.
+//! * Key-down arms: the microphone starts capturing at once, so words
+//!   spoken during the hold threshold are kept. Hold >= threshold: the
+//!   recording (with that audio) starts at the threshold; the release stops
+//!   it. A tap drops the armed audio unheard.
 //! * Release before the threshold: a tap, which presses Enter.
 //! * Escape while armed or recording: cancel.
 //! * Presses while the pipeline is busy are remembered and resolved when it
@@ -36,6 +38,10 @@ pub enum Input {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
+    /// Key-down: start capturing (kept only if the hold becomes a recording).
+    Arm { pressed_at: Instant },
+    /// The armed key-down didn't become a recording: drop its audio.
+    Disarm,
     /// Start recording. `pressed_at` is the real key-down.
     Start { pressed_at: Instant },
     /// Stop recording, transcribe and paste.
@@ -134,7 +140,7 @@ impl Machine {
         match self.stage {
             Stage::Idle => {
                 self.stage = Stage::Armed { pressed_at: at };
-                None
+                Some(Effect::Arm { pressed_at: at })
             }
             Stage::Processing => {
                 // One remembered press at most; further presses are noise.
@@ -155,7 +161,7 @@ impl Machine {
                 let held = at.saturating_duration_since(pressed_at);
                 // A release at/after the threshold whose deadline has not been
                 // processed yet was meant as a hold, but nothing was recorded.
-                (held < self.threshold).then_some(Effect::Submit { released_at: at })
+                Some(if held < self.threshold { Effect::Submit { released_at: at } } else { Effect::Disarm })
             }
             Stage::Recording => {
                 self.stage = Stage::Processing;
@@ -183,7 +189,7 @@ impl Machine {
         match self.stage {
             Stage::Armed { .. } => {
                 self.stage = Stage::Idle;
-                None
+                Some(Effect::Disarm)
             }
             Stage::Recording => {
                 self.stage = Stage::Idle;
@@ -227,7 +233,7 @@ mod tests {
     fn tap_presses_enter_and_never_records() {
         let t0 = Instant::now();
         let mut m = Machine::new(T);
-        assert_eq!(m.on_input(Input::Press, t0), None);
+        assert_eq!(m.on_input(Input::Press, t0), Some(Effect::Arm { pressed_at: t0 }));
         assert_eq!(m.next_deadline(), Some(ms(t0, 300)));
         assert_eq!(m.on_input(Input::Release, ms(t0, 120)), Some(Effect::Submit { released_at: ms(t0, 120) }));
         assert_eq!(m.next_deadline(), None);
@@ -269,7 +275,7 @@ mod tests {
         let mut m = Machine::new(T);
         m.on_input(Input::Press, t0);
         assert!(m.wants_escape());
-        assert_eq!(m.on_input(Input::Escape, ms(t0, 100)), None);
+        assert_eq!(m.on_input(Input::Escape, ms(t0, 100)), Some(Effect::Disarm));
         // The release after an escaped arm is not a tap.
         assert_eq!(m.on_input(Input::Release, ms(t0, 150)), None);
 
@@ -355,7 +361,7 @@ mod tests {
         let t0 = Instant::now();
         let mut m = Machine::new(T);
         m.on_input(Input::Press, t0);
-        assert_eq!(m.on_input(Input::Release, ms(t0, 450)), None);
+        assert_eq!(m.on_input(Input::Release, ms(t0, 450)), Some(Effect::Disarm));
     }
 
     #[test]
