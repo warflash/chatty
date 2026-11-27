@@ -131,6 +131,11 @@ pub struct Config {
     /// Use the top button of a Logitech mouse (MX Vertical) as the trigger,
     /// diverted over HID++ while chatty runs.
     pub mouse_button: bool,
+    /// Press Enter after a confirmed paste (send the message right away).
+    pub auto_enter: bool,
+    /// Without auto_enter: put a space after the pasted text so the next
+    /// dictation doesn't run into it.
+    pub trailing_space: bool,
     pub overlay: bool,
 }
 
@@ -158,6 +163,8 @@ impl Default for Config {
             autostart: true,
             check_focus: true,
             mouse_button: true,
+            auto_enter: false,
+            trailing_space: true,
             overlay: true,
         }
     }
@@ -264,6 +271,11 @@ check_focus = true
 # Logitech mice: the top button (MX Vertical's DPI switch) works like the
 # trigger while chatty runs. No Logitech software needed.
 mouse_button = true
+# Press Enter after pasting (sends the message right away).
+auto_enter = false
+# Without auto_enter: add a space after the text so the next dictation
+# doesn't run into it.
+trailing_space = true
 
 [filler_words]
 any = ["uh", "uhm", "uhh", "hmm", "mmm", "ehm"]

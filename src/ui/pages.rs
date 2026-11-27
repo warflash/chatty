@@ -1027,6 +1027,17 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "check_focus",
         cfg.check_focus,
     );
+    toggle_row(ui, c, "Press Enter after pasting", "Sends the message right away", "auto_enter", cfg.auto_enter);
+    if !cfg.auto_enter {
+        toggle_row(
+            ui,
+            c,
+            "Space after the text",
+            "So the next dictation doesn't run into this one",
+            "trailing_space",
+            cfg.trailing_space,
+        );
+    }
     toggle_row(
         ui,
         c,
@@ -1035,7 +1046,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "mouse_button",
         cfg.mouse_button,
     );
-    let r = row(ui, c, "Transcription", "Full context re-reads the open sentence every 300 ms (more accurate); streaming decodes each chunk once (less GPU work)", 300.0);
+    let r = row(ui, c, "Transcription", "Full context re-reads the sentence as you speak: more accurate. Streaming: less GPU work", 300.0);
     let modes = ["segments", "stream"];
     let mi = modes.iter().position(|m| *m == cfg.decode).unwrap_or(0);
     if let Some(i) = ui.segmented("set/decode", &["Full context", "Streaming"], mi, r) {

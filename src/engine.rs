@@ -582,6 +582,13 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
         }
     }
     let saved = crate::clipboard::save().map_err(|e| log::warn!("clipboard save: {e}")).ok();
+    let spaced;
+    let text = if cfg.trailing_space && !cfg.auto_enter {
+        spaced = format!("{text} ");
+        spaced.as_str()
+    } else {
+        text
+    };
     let Some(seq) = crate::clipboard::set_text_deferred(text)? else {
         // No owner window (should not happen): the old fixed-delay paste.
         let seq = crate::clipboard::set_text(text)?;
@@ -605,6 +612,9 @@ fn paste(text: &str, cfg: &Config) -> Result<Pasted, String> {
             log::info!("paste read by {} {:.1} ms after Ctrl+V", process_name(r.pid), ms(r.at - sent));
             std::thread::sleep(Duration::from_millis(cfg.paste_delay_after_ms));
             restore(saved, seq);
+            if cfg.auto_enter {
+                crate::input::enter()?;
+            }
             Ok(Pasted { at: Some(r.at), blocked: false, carded: false, unconfirmed: false, waited_ms: ms(waited), paste_ms: ms(t0.elapsed()) })
         }
         None => {
