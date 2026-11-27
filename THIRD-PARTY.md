@@ -1,6 +1,8 @@
 # Third-party components
 
-Shipped in the release zip:
+Shipped in the Windows release zip (macOS: the same projects' arm64 Metal
+dylibs in `chatty.app/Contents/Frameworks`, licenses in
+`Contents/Resources/licenses`; no OpenMP runtime):
 
 | Component | Files | License |
 |---|---|---|

@@ -319,6 +319,7 @@ impl Llm {
         let api = api()?;
         let dir = crate::paths::llama_dir();
         // Backends load lazily during model load; keep the context active.
+        #[allow(clippy::let_unit_value)]
         let _ctx = backend_scope(&dir)?;
         unsafe {
             let mut mp = (api.model_default_params)();

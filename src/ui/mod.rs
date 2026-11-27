@@ -641,7 +641,7 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
     if app.input.released {
         app.mem.active = 0;
     }
-    let ok = app.gfx.as_ref().unwrap().end();
+    let ok = app.gfx.as_mut().unwrap().end();
     if !ok {
         app.gfx = None;
     }

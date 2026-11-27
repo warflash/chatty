@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -57,3 +58,69 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create ${{ github.ref_name }} (Get-ChildItem dist/*.zip).FullName --generate-notes
         shell: pwsh
+
+  macos:
+    runs-on: macos-latest
+    # On tags, upload to the release the Windows job creates.
+    needs: build
+    if: ${{ !cancelled() }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Prebuilt transcribe.cpp + llama.cpp (arm64, Metal); keyed on the pins.
+      - uses: actions/cache@v4
+        with:
+          path: native
+          key: native-macos-${{ hashFiles('Cargo.toml', 'scripts/fetch-native.sh') }}
+
+      - name: Fetch prebuilt native libraries
+        run: ./scripts/fetch-native.sh
+
+      - name: Build release
+        timeout-minutes: 15
+        run: cargo build --release --locked
+
+      - name: Test
+        timeout-minutes: 10
+        run: cargo test --release --locked
+
+      # Draws through the real CoreGraphics path and checks the pixels; the
+      # PNGs are uploaded for review.
+      - name: Render checks
+        run: |
+          mkdir -p dist/previews
+          ./target/release/chatty --overlay-test
+          for k in live long transcribing notice warning progress card copied; do
+            ./target/release/chatty --render-overlay $k dist/previews/overlay-$k.png 2
+          done
+          for p in overview settings models; do
+            ./target/release/chatty --render $p dist/previews/page-$p.png 1200 820 2
+          done
+
+      - name: Clipboard check
+        continue-on-error: true
+        run: ./target/release/chatty --clipboard-test
+
+      - name: Package
+        run: ./scripts/package-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatty-macos
+          path: dist/*.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: previews-macos
+          path: dist/previews/*.png
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ github.ref_name }} dist/*.zip
