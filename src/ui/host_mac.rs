@@ -24,6 +24,8 @@ thread_local! {
     /// (window, content view)
     static WIN: RefCell<Option<(Id, Id)>> = const { RefCell::new(None) };
     static TIMER: Cell<bool> = const { Cell::new(false) };
+    /// A draw is queued on the main queue; further events only update input.
+    static QUEUED: Cell<bool> = const { Cell::new(false) };
 }
 
 const MIN_W: f64 = 860.0;
@@ -88,6 +90,20 @@ pub fn play(p: &str) {
         } else {
             log::warn!("cannot play {p}");
         }
+    }
+}
+
+/// Draws once after the events already queued are handled. A trackpad sends
+/// scroll and move events faster than a frame draws; drawing for each one
+/// let the page fall behind the fingers.
+fn request_draw() {
+    if !QUEUED.with(|q| q.replace(true)) {
+        on_main(|| {
+            QUEUED.with(|q| q.set(false));
+            if visible() {
+                draw();
+            }
+        });
     }
 }
 
@@ -197,7 +213,7 @@ extern "C-unwind" fn mouse_moved(this: *mut AnyObject, _sel: Sel, e: *mut AnyObj
     let this: &AnyObject = unsafe { &*this };
     let p = mouse_pos(this, e);
     with_app(|a| a.input.mouse = p);
-    draw();
+    request_draw();
 }
 
 extern "C-unwind" fn mouse_exited(_this: *mut AnyObject, _sel: Sel, _e: *mut AnyObject) {
@@ -210,8 +226,11 @@ extern "C-unwind" fn scroll_wheel(_this: *mut AnyObject, _sel: Sel, e: *mut AnyO
     let (dy, precise): (f64, Bool) = unsafe { (msg_send![e, scrollingDeltaY], msg_send![e, hasPreciseScrollingDeltas]) };
     // The frame scrolls `wheel * 1.2` DIPs (Windows: 120 per notch).
     let wheel = if precise.as_bool() { dy / 1.2 } else { dy * 120.0 };
-    with_app(|a| a.input.wheel += wheel as f32);
-    draw();
+    with_app(|a| {
+        a.input.wheel += wheel as f32;
+        a.input.wheel_direct = precise.as_bool();
+    });
+    request_draw();
 }
 
 /// macOS key codes mapped to the Windows virtual keys the widgets read.

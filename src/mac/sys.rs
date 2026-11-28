@@ -228,6 +228,8 @@ unsafe extern "C" {
     pub fn CGBitmapContextCreateImage(c: CGContextRef) -> CGImageRef;
     pub fn CGContextRelease(c: CGContextRef);
     pub fn CGImageRelease(i: CGImageRef);
+    pub fn CGContextDrawImage(c: CGContextRef, r: CGRect, image: CGImageRef);
+    pub fn CGImageCreateWithImageInRect(image: CGImageRef, r: CGRect) -> CGImageRef;
 
     pub fn CGContextSaveGState(c: CGContextRef);
     pub fn CGContextRestoreGState(c: CGContextRef);
@@ -250,6 +252,7 @@ unsafe extern "C" {
     pub fn CGContextAddLineToPoint(c: CGContextRef, x: CGFloat, y: CGFloat);
     pub fn CGContextReplacePathWithStrokedPath(c: CGContextRef);
     pub fn CGContextClip(c: CGContextRef);
+    pub fn CGContextEOFillPath(c: CGContextRef);
     pub fn CGContextClipToRect(c: CGContextRef, r: CGRect);
     pub fn CGContextSetBlendMode(c: CGContextRef, mode: i32);
     pub fn CGContextBeginTransparencyLayer(c: CGContextRef, aux: CFDictionaryRef);

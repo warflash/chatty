@@ -116,6 +116,24 @@ pub struct Gfx {
     custom: Option<Custom>,
     fades: Vec<(Rect, f32, f32)>,
     ns_ctx: Option<Id>,
+    /// Vertical gradients as 1-pixel-wide strips, keyed by colours and pixel
+    /// height: stretching a strip is far cheaper than CoreGraphics shading
+    /// every pixel of every card on every frame.
+    strips: std::cell::RefCell<HashMap<([u32; 8], usize), Cf>>,
+    /// Large glows as images, keyed by colour and pixel radius.
+    glows: std::cell::RefCell<HashMap<([u32; 4], usize), Cf>>,
+    /// Card shadows as nine-slice images, keyed by radius, strength, scale.
+    shadows: std::cell::RefCell<HashMap<[u32; 3], Option<Slices>>>,
+}
+
+/// A shadow rendered once around a small card: eight pieces (corners and
+/// edges, no centre) and where they are cut, in device pixels.
+struct Slices {
+    pieces: Vec<(usize, usize, Cf)>,
+    /// Cut positions: left margin, corner, right margin, bottom margin.
+    m_px: usize,
+    cs_px: usize,
+    bm_px: usize,
 }
 
 impl Drop for Gfx {
@@ -136,6 +154,69 @@ fn path_rounded(r: Rect, radius: f32) -> Option<Cf> {
     let rad = (radius.max(0.0)).min(r.w / 2.0).min(r.h / 2.0) as f64;
     let p = unsafe { CGPathCreateWithRoundedRect(cg(r), rad, rad, std::ptr::null()) };
     Cf::new(p)
+}
+
+/// The four shadow layers around `r`, each filled as a ring (even-odd, its
+/// inner edge a pixel inside `r` so the shape's edge looks as before).
+fn shadow_layers(ctx: CGContextRef, r: Rect, radius: f32, strength: f32) {
+    let Some(inner) = path_rounded(r.inset(1.0, 1.0), (radius - 1.0).max(0.0)) else { return };
+    for i in 1..=4 {
+        let d = i as f32 * 2.0;
+        let rr = Rect::new(r.x - d * 0.5, r.y + d * 0.6, r.w + d, r.h + d);
+        let Some(outer) = path_rounded(rr, radius + d * 0.5) else { continue };
+        let a = (strength / (i as f32 + 1.0)) as f64;
+        unsafe {
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, a);
+            CGContextBeginPath(ctx);
+            CGContextAddPath(ctx, outer.as_ptr());
+            CGContextAddPath(ctx, inner.as_ptr());
+            CGContextEOFillPath(ctx);
+        }
+    }
+}
+
+/// Renders the shadow around a card just large enough to hold the corners
+/// and cuts it into eight pieces (columns and rows: corner, edge, corner).
+fn render_shadow(cs: CGColorSpaceRef, radius: f32, strength: f32, s: f32) -> Option<Slices> {
+    // The layers reach 4 points left and right of the card and 12.8 below
+    // it, and start below its top; corners hold the largest layer's curve.
+    let m_px = (8.0 * s).ceil() as usize;
+    let bm_px = (16.0 * s).ceil() as usize;
+    let cs_px = ((radius.max(0.0) + 10.0) * s).ceil() as usize;
+    let t_px = 2 * cs_px + 2;
+    let (w_px, h_px) = (t_px + 2 * m_px, t_px + bm_px);
+    unsafe {
+        let ctx = CGBitmapContextCreate(std::ptr::null_mut(), w_px, h_px, 8, 0, cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+        if ctx.is_null() {
+            return None;
+        }
+        // y-down points, as in the frame; the card at (m, 0).
+        CGContextTranslateCTM(ctx, 0.0, h_px as f64);
+        CGContextScaleCTM(ctx, s as f64, -s as f64);
+        let t = t_px as f32 / s;
+        shadow_layers(ctx, Rect::new(m_px as f32 / s, 0.0, t, t), radius, strength);
+        let img = CGBitmapContextCreateImage(ctx);
+        CGContextRelease(ctx);
+        let img = Cf::new(img as CFTypeRef)?;
+        let xs = [0, m_px + cs_px, m_px + t_px - cs_px, w_px];
+        let ys = [0, cs_px, t_px - cs_px, h_px];
+        let mut pieces = Vec::new();
+        for row in 0..3 {
+            for col in 0..3 {
+                if row == 1 && col == 1 {
+                    continue;
+                }
+                let rect = CGRect::new(xs[col] as f64, ys[row] as f64, (xs[col + 1] - xs[col]) as f64, (ys[row + 1] - ys[row]) as f64);
+                let piece = Cf::new(CGImageCreateWithImageInRect(img.as_ptr() as CGImageRef, rect) as CFTypeRef)?;
+                pieces.push((col, row, piece));
+            }
+        }
+        Some(Slices { pieces, m_px, cs_px, bm_px })
+    }
+}
+
+fn color_bits(c: Color) -> [u32; 4] {
+    [c.0.to_bits(), c.1.to_bits(), c.2.to_bits(), c.3.to_bits()]
 }
 
 fn cg(r: Rect) -> CGRect {
@@ -165,6 +246,9 @@ impl Gfx {
             font_gen: u32::MAX,
             custom: None,
             fades: Vec::new(),
+            strips: Default::default(),
+            glows: Default::default(),
+            shadows: Default::default(),
             ns_ctx: None,
         };
         g.resize(w_px, h_px);
@@ -313,7 +397,133 @@ impl Gfx {
 
     /// Vertical gradient fill.
     pub fn gradient(&self, r: Rect, radius: f32, top: Color, bottom: Color) {
-        self.linear(r, radius, pt(r.x, r.y), pt(r.x, r.bottom()), top, bottom);
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        let h_px = (r.h as f64 * self.scale()).ceil() as usize;
+        let Some(strip) = self.strip(top, bottom, h_px.max(1)) else {
+            return self.linear(r, radius, pt(r.x, r.y), pt(r.x, r.bottom()), top, bottom);
+        };
+        let img = strip.as_ptr() as CGImageRef;
+        let rad = radius.max(0.0).min(r.w / 2.0).min(r.h / 2.0);
+        // Under a rounded clip CoreGraphics builds a mask the size of the
+        // shape, which for the cards cost a third of a frame. Large shapes
+        // skip it: the strip fills the straight-edged cross through rect
+        // clips (pixel-aligned, so the pieces meet without seams), and each
+        // corner square gets the rounded shape in a flat colour. Across one
+        // corner radius the cards' gradient changes by under half a level.
+        let large = rad > 0.0 && r.w > 4.0 * rad && r.h > 4.0 * rad && r.w * r.h > 4000.0;
+        let path = path_rounded(r, rad);
+        // The strip covers whole pixels so only the clip antialiases the
+        // shape's edges (an image edge on a fractional pixel would darken
+        // them a second time).
+        let s = self.scale() as f32;
+        let (x0, y0) = ((r.x * s).floor() / s, (r.y * s).floor() / s);
+        let outer = Rect::new(x0, y0, (r.right() * s).ceil() / s - x0, (r.bottom() * s).ceil() / s - y0);
+        unsafe {
+            if !large || path.is_none() {
+                CGContextSaveGState(self.ctx);
+                match &path {
+                    Some(p) if rad > 0.0 => {
+                        CGContextBeginPath(self.ctx);
+                        CGContextAddPath(self.ctx, p.as_ptr());
+                        CGContextClip(self.ctx);
+                    }
+                    _ => CGContextClipToRect(self.ctx, cg(r)),
+                }
+                // One row per device pixel: no filtering needed.
+                CGContextSetInterpolationQuality(self.ctx, 1);
+                CGContextDrawImage(self.ctx, cg(outer), img);
+                CGContextRestoreGState(self.ctx);
+                return;
+            }
+            let path = path.unwrap();
+            let (inner_l, inner_r) = (((r.x + rad) * s).ceil() / s, ((r.right() - rad) * s).floor() / s);
+            let (inner_t, inner_b) = (((r.y + rad) * s).ceil() / s, ((r.bottom() - rad) * s).floor() / s);
+            let pieces = [
+                Rect::new(inner_l, r.y, inner_r - inner_l, r.h),
+                Rect::new(r.x, inner_t, inner_l - r.x, inner_b - inner_t),
+                Rect::new(inner_r, inner_t, r.right() - inner_r, inner_b - inner_t),
+            ];
+            for piece in pieces {
+                CGContextSaveGState(self.ctx);
+                CGContextClipToRect(self.ctx, cg(piece));
+                CGContextSetInterpolationQuality(self.ctx, 1);
+                CGContextDrawImage(self.ctx, cg(outer), img);
+                CGContextRestoreGState(self.ctx);
+            }
+            let corners = [
+                (Rect::new(r.x, r.y, inner_l - r.x, inner_t - r.y), top),
+                (Rect::new(inner_r, r.y, r.right() - inner_r, inner_t - r.y), top),
+                (Rect::new(r.x, inner_b, inner_l - r.x, r.bottom() - inner_b), bottom),
+                (Rect::new(inner_r, inner_b, r.right() - inner_r, r.bottom() - inner_b), bottom),
+            ];
+            for (corner, c) in corners {
+                CGContextSaveGState(self.ctx);
+                CGContextClipToRect(self.ctx, cg(corner));
+                self.set_fill(c);
+                CGContextBeginPath(self.ctx);
+                CGContextAddPath(self.ctx, path.as_ptr());
+                CGContextFillPath(self.ctx);
+                CGContextRestoreGState(self.ctx);
+            }
+        }
+    }
+
+    /// Renders the glow image for `c` at `r_px` into the cache.
+    fn glow_image(&self, c: Color, r_px: usize) -> Option<()> {
+        let key = (color_bits(c), r_px);
+        if self.glows.borrow().contains_key(&key) {
+            return Some(());
+        }
+        let grad = self.gradient_obj(&[(0.0, c), (1.0, c.alpha(0.0))])?;
+        let side = r_px * 2;
+        let img = unsafe {
+            let ctx = CGBitmapContextCreate(std::ptr::null_mut(), side, side, 8, 0, self.cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+            if ctx.is_null() {
+                return None;
+            }
+            let m = pt(r_px as f32, r_px as f32);
+            CGContextDrawRadialGradient(ctx, grad.as_ptr() as CGGradientRef, m, 0.0, m, r_px as f64, 0);
+            let img = CGBitmapContextCreateImage(ctx);
+            CGContextRelease(ctx);
+            Cf::new(img as CFTypeRef)?
+        };
+        let mut g = self.glows.borrow_mut();
+        if g.len() > 16 {
+            g.clear();
+        }
+        g.insert(key, img);
+        Some(())
+    }
+
+    /// A 1 x `h_px` image of the gradient from `top` to `bottom`, cached.
+    fn strip(&self, top: Color, bottom: Color, h_px: usize) -> Option<std::cell::Ref<'_, Cf>> {
+        let b = |c: Color| [c.0.to_bits(), c.1.to_bits(), c.2.to_bits(), c.3.to_bits()];
+        let (t, bo) = (b(top), b(bottom));
+        let key = ([t[0], t[1], t[2], t[3], bo[0], bo[1], bo[2], bo[3]], h_px);
+        if !self.strips.borrow().contains_key(&key) {
+            let grad = self.gradient_obj(&[(0.0, top), (1.0, bottom)])?;
+            let img = unsafe {
+                let ctx = CGBitmapContextCreate(std::ptr::null_mut(), 1, h_px, 8, 0, self.cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+                if ctx.is_null() {
+                    return None;
+                }
+                // Bitmap space is y-up, the frame's is y-down, and an image
+                // drawn under the frame's flip lands upside down: `top` at
+                // y = 0 ends up at the top of the shape.
+                CGContextDrawLinearGradient(ctx, grad.as_ptr() as CGGradientRef, pt(0.0, 0.0), pt(0.0, h_px as f32), kCGGradientDrawsBeforeStartLocation | kCGGradientDrawsAfterEndLocation);
+                let img = CGBitmapContextCreateImage(ctx);
+                CGContextRelease(ctx);
+                Cf::new(img as CFTypeRef)?
+            };
+            let mut s = self.strips.borrow_mut();
+            if s.len() > 512 {
+                s.clear();
+            }
+            s.insert(key, img);
+        }
+        std::cell::Ref::filter_map(self.strips.borrow(), |s| s.get(&key)).ok()
     }
 
     /// Horizontal gradient fill.
@@ -322,7 +532,28 @@ impl Gfx {
     }
 
     /// Radial glow centred at (cx, cy), fading to transparent.
+    ///
+    /// Large ones (the page header's) are drawn from a cached image: shading
+    /// a 520-point radial gradient on every frame cost a third of it.
     pub fn glow(&self, cx: f32, cy: f32, radius: f32, c: Color) {
+        let r_px = (radius as f64 * self.scale()).ceil() as usize;
+        if r_px >= 128 && self.glow_image(c, r_px).is_some() {
+            let img = self.glows.borrow().get(&(color_bits(c), r_px)).map(|i| i.as_ptr());
+            if let Some(img) = img {
+                unsafe {
+                    CGContextSaveGState(self.ctx);
+                    CGContextSetInterpolationQuality(self.ctx, 1);
+                    // Whole device pixels at 1:1, so the draw is a plain blend
+                    // rather than a resample.
+                    let s = self.scale() as f32;
+                    let side = (r_px * 2) as f32 / s;
+                    let (x, y) = (((cx * s).round() - r_px as f32) / s, ((cy * s).round() - r_px as f32) / s);
+                    CGContextDrawImage(self.ctx, cg(Rect::new(x, y, side, side)), img as CGImageRef);
+                    CGContextRestoreGState(self.ctx);
+                }
+                return;
+            }
+        }
         let Some(grad) = self.gradient_obj(&[(0.0, c), (1.0, c.alpha(0.0))]) else { return };
         unsafe {
             CGContextDrawRadialGradient(self.ctx, grad.as_ptr() as CGGradientRef, pt(cx, cy), 0.0, pt(cx, cy), radius as f64, 0);
@@ -330,12 +561,46 @@ impl Gfx {
     }
 
     /// Soft drop shadow under a rounded rect (stacked translucent layers).
+    ///
+    /// The shape drawn on top is opaque, so only the ring around it shows.
+    /// The ring is rendered once per radius into nine-slice pieces and
+    /// stitched around each card: tracing four translucent layers under every
+    /// card cost most of a frame at 2x.
     pub fn shadow(&self, r: Rect, radius: f32, strength: f32) {
-        for i in 1..=4 {
-            let d = i as f32 * 2.0;
-            let rr = Rect::new(r.x - d * 0.5, r.y + d * 0.6, r.w + d, r.h + d);
-            self.fill(rr, radius + d * 0.5, Color(0.0, 0.0, 0.0, strength / (i as f32 + 1.0)));
+        let s = self.scale() as f32;
+        let key = [radius.to_bits(), strength.to_bits(), s.to_bits()];
+        if !self.shadows.borrow().contains_key(&key) {
+            let slices = render_shadow(self.cs, radius, strength, s);
+            self.shadows.borrow_mut().insert(key, slices);
         }
+        let shadows = self.shadows.borrow();
+        let Some(Some(sl)) = shadows.get(&key) else { return self.shadow_rings(r, radius, strength) };
+        let (m, cs, bm) = (sl.m_px as f32 / s, sl.cs_px as f32 / s, sl.bm_px as f32 / s);
+        if r.w < 2.0 * cs + 1.0 || r.h < 2.0 * cs + 1.0 {
+            return self.shadow_rings(r, radius, strength);
+        }
+        let xs = [r.x - m, r.x + cs, r.right() - cs, r.right() + m];
+        let ys = [r.y, r.y + cs, r.bottom() - cs, r.bottom() + bm];
+        unsafe {
+            CGContextSaveGState(self.ctx);
+            CGContextSetInterpolationQuality(self.ctx, 1);
+            for (col, row, img) in &sl.pieces {
+                let d = Rect::new(xs[*col], ys[*row], xs[col + 1] - xs[*col], ys[row + 1] - ys[*row]);
+                // The pieces are cut from a y-down bitmap; the frame's flip
+                // would draw them upside down, so flip back about the piece.
+                CGContextSaveGState(self.ctx);
+                CGContextTranslateCTM(self.ctx, 0.0, (d.y + d.bottom()) as f64);
+                CGContextScaleCTM(self.ctx, 1.0, -1.0);
+                CGContextDrawImage(self.ctx, cg(d), img.as_ptr() as CGImageRef);
+                CGContextRestoreGState(self.ctx);
+            }
+            CGContextRestoreGState(self.ctx);
+        }
+    }
+
+    /// The shadow traced directly, for shapes too small for the slices.
+    fn shadow_rings(&self, r: Rect, radius: f32, strength: f32) {
+        shadow_layers(self.ctx, r, radius, strength);
     }
 
     /// Rounded-rect outline with a vertical gradient.

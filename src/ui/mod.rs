@@ -113,6 +113,10 @@ pub struct Input {
     pub pressed: bool,
     pub released: bool,
     pub wheel: f32,
+    /// The wheel delta came from a trackpad or Magic Mouse: the system has
+    /// already applied acceleration and momentum, so the page follows it
+    /// exactly instead of easing towards it (which trails the fingers).
+    pub wheel_direct: bool,
     pub chars: Vec<char>,
     pub keys: Vec<u16>,
 }
@@ -566,6 +570,9 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
     }
     let max_scroll = (app.content_h - app.viewport_h).max(0.0);
     app.scroll_target = app.scroll_target.clamp(0.0, max_scroll);
+    if app.input.wheel_direct && app.mem.popup.is_none() {
+        app.scroll = app.scroll_target;
+    }
     let diff = app.scroll_target - app.scroll;
     app.scroll = if diff.abs() < 0.5 { app.scroll_target } else { app.scroll + diff * 0.35 };
     let scrolling = app.scroll != app.scroll_target;
@@ -616,7 +623,10 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
             filler_lang: &mut app.filler_lang,
             expanded: &mut app.expanded,
         };
-        let top = content.y - app.scroll;
+        // Whole device pixels: cards and text stay pixel-aligned while the
+        // page moves (crisper, and cheaper to draw).
+        let px = dpi / 96.0;
+        let top = content.y - (app.scroll * px).round() / px;
         let end_y = pages::draw(&mut ui, app.page, Rect::new(content.x, top, content.w, h), &mut page_state, &mut nav_to);
         content_h = end_y - top;
         ui.g.pop_clip();
@@ -665,6 +675,7 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
     app.input.pressed = false;
     app.input.released = false;
     app.input.wheel = 0.0;
+    app.input.wheel_direct = false;
     app.input.chars.clear();
     app.input.keys.clear();
     actions
