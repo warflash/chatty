@@ -43,7 +43,7 @@ Apple Silicon, macOS 13.3 or later. Download `chatty-<version>-macos-arm64.zip` 
 * chatty lives in the menu bar (no Dock icon until its window is open). Its menu shows the last transcript (click it to copy), model, language, overlay and cleanup switches.
 * On first start macOS asks for **Accessibility** (to see the trigger, paste and check the focused field) and **Microphone** access. Grant both in System Settings › Privacy & Security; the menu bar menu offers a shortcut while Accessibility is missing. The app is ad-hoc signed, so macOS may ask for Accessibility again after an update.
 * Speech and cleanup run on the GPU through Metal (`backend = "metal"` or `"auto"`).
-* Config, models, the statistics database, history audio and the log live in `~/Library/Application Support/chatty`. "Open at login" installs a LaunchAgent (`~/Library/LaunchAgents/com.github.fantasyflip.chatty.plist`).
+* Config, models, the statistics database, history audio and the log live in `~/Library/Application Support/chatty`. "Open at login" installs a LaunchAgent (`~/Library/LaunchAgents/com.github.warflash.chatty.plist`).
 
 ## Build on Windows
 

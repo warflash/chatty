@@ -149,7 +149,7 @@ release the single-instance mutex, and deletes the `*.old` files. Config
 and data live outside the install folder and are untouched.
 
 On macOS the updater looks for `chatty-X.Y.Z-macos-arm64.zip` (published
-by the fork that carries the macOS port, fantasyflip/chatty), unpacks it
+on the same releases as the Windows zip), unpacks it
 with `ditto` into `~/Library/Application Support/chatty/update` and
 replaces the whole bundle: the running `chatty.app` is renamed to
 `chatty.app.old` and the new one moved into its place (put back on

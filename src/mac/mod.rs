@@ -120,7 +120,7 @@ pub fn single_instance() -> bool {
     true
 }
 
-const AGENT: &str = "com.github.fantasyflip.chatty";
+const AGENT: &str = "com.github.warflash.chatty";
 
 fn agent_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/LaunchAgents").join(format!("{AGENT}.plist")))

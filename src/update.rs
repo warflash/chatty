@@ -26,12 +26,8 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-/// Where this platform's builds are published: the macOS port's releases
-/// come from its fork.
-#[cfg(windows)]
+/// Where builds are published (both platforms' zips sit on the same releases).
 const RELEASES: &str = "https://api.github.com/repos/warflash/chatty/releases";
-#[cfg(target_os = "macos")]
-const RELEASES: &str = "https://api.github.com/repos/fantasyflip/chatty/releases";
 /// The release asset for this platform ends with this.
 #[cfg(windows)]
 const ZIP_SUFFIX: &str = "-windows-x64.zip";

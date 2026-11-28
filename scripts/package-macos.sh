@@ -46,7 +46,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>chatty</string>
   <key>CFBundleDisplayName</key><string>chatty</string>
-  <key>CFBundleIdentifier</key><string>com.github.fantasyflip.chatty</string>
+  <key>CFBundleIdentifier</key><string>com.github.warflash.chatty</string>
   <key>CFBundleExecutable</key><string>chatty</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -62,8 +62,8 @@ PLIST
 
 # Inside out: libraries first, then the bundle.
 find "$app/Contents/Frameworks" -name '*.dylib' -type f -exec codesign --force --sign - {} \;
-codesign --force --sign - --identifier com.github.fantasyflip.chatty \
-  --requirements '=designated => identifier "com.github.fantasyflip.chatty"' "$app"
+codesign --force --sign - --identifier com.github.warflash.chatty \
+  --requirements '=designated => identifier "com.github.warflash.chatty"' "$app"
 codesign --verify --deep --strict "$app"
 
 zip=$out/chatty-$version-macos-arm64.zip
