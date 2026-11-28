@@ -3,8 +3,10 @@
 #   chatty.app/Contents/MacOS/chatty
 #   chatty.app/Contents/Frameworks/   libtranscribe + ggml dylibs, llama/
 #   chatty.app/Contents/Resources/    AppIcon.icns, licenses, README
-# The bundle is ad-hoc signed so macOS keeps its Accessibility and
-# Microphone grants across launches (they are tied to the signature).
+# The bundle is ad-hoc signed with an explicit designated requirement (the
+# bundle identifier). Ad-hoc signing alone pins the requirement to the
+# binary's hash, so every rebuild lost the Accessibility and Microphone
+# grants and macOS asked again on each launch.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD
@@ -60,7 +62,8 @@ PLIST
 
 # Inside out: libraries first, then the bundle.
 find "$app/Contents/Frameworks" -name '*.dylib' -type f -exec codesign --force --sign - {} \;
-codesign --force --sign - --identifier com.github.fantasyflip.chatty "$app"
+codesign --force --sign - --identifier com.github.fantasyflip.chatty \
+  --requirements '=designated => identifier "com.github.fantasyflip.chatty"' "$app"
 codesign --verify --deep --strict "$app"
 
 zip=$out/chatty-$version-macos-arm64.zip

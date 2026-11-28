@@ -211,7 +211,10 @@ pub fn quit() -> ! {
     logi::shutdown();
     overlay::shutdown();
     log::logger().flush();
-    std::process::exit(0);
+    // `_exit`, not `exit`: the atexit destructors of ggml's Metal backend
+    // abort when the loaded models still hold GPU buffers, which turned
+    // every Quit into a crash report. The OS frees everything anyway.
+    unsafe { libc::_exit(0) }
 }
 
 /// `chatty --clipboard-test`: checks lazy-provider paste confirmation with
