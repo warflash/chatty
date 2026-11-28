@@ -257,9 +257,18 @@ pub fn spawn_writer(cfg: crate::config::Shared) -> Writer {
                     return;
                 }
             };
+            // The newest transcript from earlier runs, for the tray flyout.
+            if let Some(row) = db
+                .query("SELECT final_text, pressed_at FROM dictations WHERE final_text <> '' ORDER BY id DESC LIMIT 1", &[])
+                .ok()
+                .and_then(|rows| rows.into_iter().next())
+            {
+                crate::status::set_last(&row[0].text(), row[1].int());
+            }
             for msg in rx {
                 let result = match msg {
                     Msg::Dictation(d, audio) => {
+                        crate::status::set_last(&d.final_text, d.pressed_at);
                         let r = insert(&db, &d, audio, cfg.get().history_size);
                         crate::ui::stats_changed();
                         r

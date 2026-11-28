@@ -28,6 +28,9 @@ pub struct Status {
     pub loaded: Option<(String, String)>,
     /// Last notice shown in the overlay.
     pub notice: Option<(String, Instant)>,
+    /// The most recent transcript and its key-down time (unix ms), for the
+    /// tray flyout.
+    pub last: Option<(String, i64)>,
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -42,6 +45,7 @@ fn with<R>(f: impl FnOnce(&mut Status) -> R) -> R {
         downloads: Vec::new(),
         loaded: None,
         notice: None,
+        last: None,
     });
     f(s)
 }
@@ -83,4 +87,11 @@ pub fn set_download(file: &str, fraction: Option<f32>) {
             s.downloads.push((file.to_string(), f));
         }
     });
+}
+
+/// Records the most recent transcript; empty text is ignored.
+pub fn set_last(text: &str, at_ms: i64) {
+    if !text.trim().is_empty() {
+        update(|s| s.last = Some((text.to_string(), at_ms)));
+    }
 }

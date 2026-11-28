@@ -418,6 +418,25 @@ impl Gfx {
         }
     }
 
+    /// Wrapped text at a fixed line height, cut after `max_lines` lines with
+    /// an ellipsis.
+    pub fn text_lines(&mut self, s: &str, font: Font, r: Rect, line_h: f32, max_lines: u32, c: Color) {
+        if s.is_empty() {
+            return;
+        }
+        let format = self.format(font, true, Align::Left);
+        let l = self.spaced(s, font, r.w, line_h);
+        unsafe {
+            let _ = l.SetMaxHeight(line_h * max_lines as f32);
+            if let Ok(sign) = self.dw.CreateEllipsisTrimmingSign(&format) {
+                let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_WORD, delimiter: 0, delimiterCount: 0 };
+                let _ = l.SetTrimming(&trimming, &sign);
+            }
+            self.set(c);
+            self.rt.DrawTextLayout(Vector2 { X: r.x, Y: r.y }, &l, &self.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+
     /// Rounded-rect outline with a vertical gradient.
     pub fn stroke_vgradient(&self, r: Rect, radius: f32, top: Color, bottom: Color, width: f32) {
         unsafe {
@@ -594,6 +613,11 @@ impl Gfx {
 
     pub fn pop_fade(&self) {
         unsafe { self.rt.PopLayer() };
+    }
+
+    /// Translates everything drawn after this call (DIPs); (0, 0) resets.
+    pub fn set_offset(&self, dx: f32, dy: f32) {
+        unsafe { self.rt.SetTransform(&windows_numerics::Matrix3x2::translation(dx, dy)) };
     }
 
     pub fn push_clip(&self, r: Rect) {

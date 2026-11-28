@@ -7,6 +7,7 @@
 //! frame, outside the window state borrow (Win32 calls may re-enter the
 //! window procedure).
 
+pub mod flyout;
 pub mod gfx;
 mod pages;
 
@@ -126,6 +127,7 @@ fn visible() -> bool {
 
 /// Live status changed (any thread).
 pub fn notify() {
+    flyout::notify();
     if let Some(h) = hwnd() {
         if visible() && !NOTIFY_PENDING.swap(true, Ordering::AcqRel) {
             unsafe {
@@ -865,7 +867,16 @@ fn popup(ui: &mut Ui, w: f32, h: f32) {
     if y + ph > h - 8.0 {
         y = (p.anchor.y - ph - 4.0).max(8.0);
     }
-    let r = Rect::new(p.anchor.x, y, p.anchor.w.max(220.0).min(w - p.anchor.x - 8.0), ph);
+    // Wide enough for the longest option (short lists only: this runs every
+    // frame), moved left when the right edge is near.
+    let mut pw = p.anchor.w.max(220.0);
+    if p.options.len() <= 40 {
+        for o in &p.options {
+            pw = pw.max(ui.g.measure(o, Font::text(13.0), 1000.0, false).0 + 40.0);
+        }
+    }
+    let pw = pw.min(w - 16.0);
+    let r = Rect::new(p.anchor.x.min(w - pw - 8.0).max(8.0), y, pw, ph);
     let outside = ui.input.pressed && !r.contains(ui.input.mouse);
     ui.g.shadow(r, 10.0, 0.22);
     ui.g.fill(r, 10.0, Color::rgb(32, 32, 38));

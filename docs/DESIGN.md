@@ -52,7 +52,7 @@ engine ──── model, VAD, cleanup LLM; drains ring every 20 ms, streams or
      │    WASAPI callback ──rtrb──▶ engine
      ├─ download threads (on demand)
      └─ stats writer thread ── SQLite
-main thread ─ message loop: tray icon + menu, overlay window, clipboard owner
+main thread ─ message loop: tray icon + flyout, overlay window, clipboard owner
    also the statistics window (created on first open, hidden on close);
    its report is computed on a short-lived thread
 config watcher ─ FindFirstChangeNotification, reloads config.toml
@@ -123,7 +123,8 @@ src/stats.rs        schema, writer, report queries
 src/stats_ui.rs     statistics window (GDI)
 src/sqlite.rs       winsqlite3 FFI
 src/overlay.rs      click-through overlay
-src/tray.rs         tray icon and menu
+src/tray.rs         tray icon
+src/ui/flyout.rs    tray flyout: last transcript, quick settings
 src/update.rs       update check and self-update from GitHub releases
 src/clipboard.rs, input.rs, config.rs, paths.rs, logger.rs, wav.rs, bench.rs
 ```

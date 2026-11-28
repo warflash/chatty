@@ -29,7 +29,7 @@ Download the zip from [Releases](https://github.com/warflash/chatty/releases), u
 | **Tap** | Press Enter |
 | **Escape** while recording | Cancel |
 
-Map a spare mouse button to Ctrl + Numpad / for one-handed dictation. The tray menu and window switch model, language and the optional LLM cleanup pass, and show history and statistics. Settings live in `config.toml` (next to the exe, or `%APPDATA%\chatty`).
+Map a spare mouse button to Ctrl + Numpad / for one-handed dictation. Right-click the tray icon for a panel with the last transcript (click it to copy), model, language, overlay and LLM cleanup switches; left-click opens the window with history and statistics. Settings live in `config.toml` (next to the exe, or `%APPDATA%\chatty`).
 
 Seven speech models are available, three of them streaming, covering up to 32 languages. Timings are in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md), the design in [docs/DESIGN.md](docs/DESIGN.md).
 

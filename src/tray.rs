@@ -1,34 +1,21 @@
 //! Tray icon and the hidden main window that owns it (and the clipboard).
+//! Right-click opens the flyout (`ui::flyout`), left-click the main window.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, ShellExecuteW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, w};
+use windows::core::w;
 
 use crate::config;
-use crate::models;
 
 const WM_TRAY: u32 = WM_APP + 10;
 const WM_TRAY_UPDATE: u32 = WM_APP + 11;
-
-const ID_MODEL: usize = 1000;
-const ID_CLEANUP_MODEL: usize = 1100;
-const ID_LANG: usize = 1200;
-const ID_CLEANUP_TOGGLE: usize = 1300;
-const ID_STATS: usize = 1301;
-const ID_OPEN: usize = 1307;
-const ID_CONFIG: usize = 1302;
-const ID_LOG: usize = 1303;
-const ID_FOLDER: usize = 1304;
-const ID_QUIT: usize = 1305;
-const ID_OVERLAY: usize = 1306;
-
-const LANGUAGES: &[(&str, &str)] = &[("auto", "Auto-detect"), ("en", "English"), ("de", "German")];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -191,105 +178,18 @@ pub fn remove_icon() {
     }
 }
 
-fn open_path(path: &std::path::Path) {
-    unsafe {
-        ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL);
-    }
+/// Screen rect of the tray icon (inside the overflow panel while that is
+/// open).
+fn icon_rect(hwnd: HWND) -> Option<RECT> {
+    let id = NOTIFYICONIDENTIFIER { cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: hwnd, uID: 1, ..Default::default() };
+    unsafe { Shell_NotifyIconGetRect(&id) }.ok().filter(|r| r.right > r.left)
 }
 
-fn append(menu: HMENU, id: usize, text: &str, checked: bool, enabled: bool) {
-    let mut flags = MF_STRING;
-    if checked {
-        flags |= MF_CHECKED;
-    }
-    if !enabled {
-        flags |= MF_GRAYED;
-    }
-    unsafe {
-        let _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
-    }
-}
-
-fn show_menu(hwnd: HWND) {
-    let Some(actions) = ACTIONS.get() else { return };
-    let cfg = actions.cfg.get();
-    unsafe {
-        let menu = CreatePopupMenu().unwrap();
-        let models_menu = CreatePopupMenu().unwrap();
-        for (i, m) in models::ASR.iter().enumerate() {
-            let label = if m.asset.is_ready() {
-                m.name.to_string()
-            } else {
-                format!("{}  (download {} MB)", m.name, m.asset.size >> 20)
-            };
-            append(models_menu, ID_MODEL + i, &label, m.id == cfg.model, true);
-        }
-        let lang_menu = CreatePopupMenu().unwrap();
-        for (i, (code, name)) in LANGUAGES.iter().enumerate() {
-            append(lang_menu, ID_LANG + i, name, cfg.language == *code, true);
-        }
-        let cleanup_menu = CreatePopupMenu().unwrap();
-        append(cleanup_menu, ID_CLEANUP_TOGGLE, "Enabled", cfg.cleanup.enabled, true);
-        let _ = AppendMenuW(cleanup_menu, MF_SEPARATOR, 0, None);
-        for (i, m) in models::CLEANUP.iter().enumerate() {
-            let label =
-                if m.asset.is_ready() { m.name.to_string() } else { format!("{}  (download {} MB)", m.name, m.asset.size >> 20) };
-            append(cleanup_menu, ID_CLEANUP_MODEL + i, &label, m.id == cfg.cleanup.model, true);
-        }
-
-        append(menu, 0, &format!("chatty {}", env!("CARGO_PKG_VERSION")), false, false);
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_POPUP, models_menu.0 as usize, w!("Model"));
-        let _ = AppendMenuW(menu, MF_POPUP, lang_menu.0 as usize, w!("Language"));
-        let _ = AppendMenuW(menu, MF_POPUP, cleanup_menu.0 as usize, w!("Cleanup (LLM)"));
-        append(menu, ID_OVERLAY, "Live overlay", cfg.overlay, true);
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        append(menu, ID_OPEN, "Open chatty", false, true);
-        append(menu, ID_STATS, "Statistics", false, true);
-        append(menu, ID_CONFIG, "Open config.toml", false, true);
-        append(menu, ID_LOG, "Open log", false, true);
-        append(menu, ID_FOLDER, "Open data folder", false, true);
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        append(menu, ID_QUIT, "Quit", false, true);
-
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        // Required so the menu closes when clicking elsewhere.
-        let _ = SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, Some(0), hwnd, None);
-        let _ = DestroyMenu(menu);
-        handle_command(cmd.0 as usize, actions);
-    }
-}
-
-fn handle_command(id: usize, actions: &Actions) {
-    let cfg = &actions.cfg;
-    match id {
-        0 => {}
-        ID_STATS => crate::ui::open(Some(crate::ui::Page::Stats)),
-        ID_OPEN => crate::ui::open(None),
-        ID_CONFIG => open_path(&cfg.path),
-        ID_LOG => open_path(&crate::paths::log_path()),
-        ID_FOLDER => open_path(&crate::paths::local_dir()),
-        ID_QUIT => {
-            log::info!("quit");
-            remove_icon();
-            log::logger().flush();
-            std::process::exit(0);
-        }
-        ID_CLEANUP_TOGGLE => cfg.set(&[("cleanup.enabled", (!cfg.get().cleanup.enabled).into())]),
-        ID_OVERLAY => cfg.set(&[("overlay", (!cfg.get().overlay).into())]),
-        i if (ID_MODEL..ID_MODEL + models::ASR.len()).contains(&i) => {
-            cfg.set(&[("model", models::ASR[i - ID_MODEL].id.into())]);
-        }
-        i if (ID_CLEANUP_MODEL..ID_CLEANUP_MODEL + models::CLEANUP.len()).contains(&i) => {
-            cfg.set(&[("cleanup.model", models::CLEANUP[i - ID_CLEANUP_MODEL].id.into())]);
-        }
-        i if (ID_LANG..ID_LANG + LANGUAGES.len()).contains(&i) => {
-            cfg.set(&[("language", LANGUAGES[i - ID_LANG].0.into())]);
-        }
-        _ => {}
-    }
+pub fn quit() {
+    log::info!("quit");
+    remove_icon();
+    log::logger().flush();
+    std::process::exit(0);
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -302,7 +202,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         match msg {
             WM_TRAY => {
                 match lparam.0 as u32 {
-                    WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                    WM_RBUTTONUP | WM_CONTEXTMENU => crate::ui::flyout::toggle(icon_rect(hwnd)),
                     WM_LBUTTONUP => crate::ui::open(None),
                     _ => {}
                 }
