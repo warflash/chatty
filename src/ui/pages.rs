@@ -193,7 +193,8 @@ fn overview(ui: &mut Ui, c: &mut Col, st: &mut PageState, nav: &mut Option<Page>
     chips_x += ui.chip(&lang, chips_x, cy_chips, theme::ACCENT) + 8.0;
     chips_x += ui.chip(if cfg.cleanup.enabled { "Cleanup on" } else { "Cleanup off" }, chips_x, cy_chips, if cfg.cleanup.enabled { theme::GREEN } else { theme::TEXT2 }) + 8.0;
     chips_x += ui.chip(&format!("Hold {} ms", cfg.hold_threshold_ms), chips_x, cy_chips, theme::TEXT2) + 8.0;
-    ui.chip(if cfg.decode == "stream" { "Streaming" } else { "Full-context pass" }, chips_x, cy_chips, theme::TEXT2);
+    let low_load = cfg.decode == "stream" && models::asr(&cfg.model).is_some_and(|m| m.is_streaming());
+    ui.chip(if low_load { "Low-load mode" } else { "Full context" }, chips_x, cy_chips, theme::TEXT2);
     if live {
         ui.g.push_clip(Rect::new(tx, hero.y + 128.0, text_w, live_h));
         // Show the tail when the text is long.
@@ -683,7 +684,9 @@ fn models_page(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         ui.g.label(m.note, Font::text(12.0), Rect::new(card.x + 18.0, card.y + 38.0, card.w - 260.0, 18.0), theme::TEXT2, Align::Left);
         let mut x = card.x + 18.0;
         let y = card.y + 66.0;
-        x += ui.chip(if m.is_streaming() { "Streaming" } else { "Offline" }, x, y, if m.is_streaming() { theme::ACCENT } else { theme::TEXT2 }) + 6.0;
+        if m.is_streaming() {
+            x += ui.chip("Low-load mode", x, y, theme::GREEN) + 6.0;
+        }
         let langs = if m.languages.len() == 1 { "English".to_string() } else { format!("{} languages", m.languages.len()) };
         x += ui.chip(&langs, x, y, theme::BLUE) + 6.0;
         x += ui.chip(&format!("{} MB", m.asset.size >> 20), x, y, theme::TEXT3) + 6.0;
@@ -958,10 +961,14 @@ fn words(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
 
 /// A settings row: title + description on the left; returns the control area.
 fn row(ui: &mut Ui, c: &mut Col, title: &str, desc: &str, control_w: f32) -> Rect {
+    row_tinted(ui, c, title, desc, control_w, theme::TEXT3)
+}
+
+fn row_tinted(ui: &mut Ui, c: &mut Col, title: &str, desc: &str, control_w: f32, desc_color: Color) -> Rect {
     let r = c.take(68.0);
     ui.card(r);
     ui.g.label(title, Font::text(14.0), Rect::new(r.x + 18.0, r.y + 13.0, r.w - control_w - 60.0, 20.0), theme::TEXT, Align::Left);
-    ui.g.label(desc, Font::text(12.0), Rect::new(r.x + 18.0, r.y + 35.0, r.w - control_w - 60.0, 18.0), theme::TEXT3, Align::Left);
+    ui.g.label(desc, Font::text(12.0), Rect::new(r.x + 18.0, r.y + 35.0, r.w - control_w - 60.0, 18.0), desc_color, Align::Left);
     c.gap(4.0);
     Rect::new(r.right() - control_w - 18.0, r.y + (r.h - 32.0) / 2.0, control_w, 32.0)
 }
@@ -1053,10 +1060,17 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
         "mouse_button",
         cfg.mouse_button,
     );
-    let r = row(ui, c, "Transcription", "Full context re-reads the sentence as you speak: more accurate. Streaming: less GPU work", 300.0);
+    // Low-load mode is the model's streaming decoder; models without one
+    // always run full context (engine.rs), so say so instead of pretending.
+    let supported = models::asr(&cfg.model).is_some_and(|m| m.is_streaming());
+    let r = if cfg.decode == "stream" && !supported {
+        row_tinted(ui, c, "Transcription", "This model has no low-load mode; uses full context", 300.0, theme::AMBER)
+    } else {
+        row(ui, c, "Transcription", "Full context: more accurate. Low-load: less GPU", 300.0)
+    };
     let modes = ["segments", "stream"];
     let mi = modes.iter().position(|m| *m == cfg.decode).unwrap_or(0);
-    if let Some(i) = ui.segmented("set/decode", &["Full context", "Streaming"], mi, r) {
+    if let Some(i) = ui.segmented("set/decode", &["Full context", "Low-load mode"], mi, r) {
         set(ui, "decode", modes[i]);
     }
 

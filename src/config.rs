@@ -252,7 +252,8 @@ paste_delay_after_ms = {after}
 preview_interval_ms = {preview}
 # "segments": every pass sees the whole sentence; the pasted text comes from
 # a final pass over your speech. "stream": the model's streaming decoder
-# (cheaper, for CPU-only machines).
+# ("Low-load mode" in Settings; cheaper, for CPU-only machines). Only the
+# Parakeet Unified, Nemotron and Voxtral models have one; others ignore it.
 decode = "segments"
 # Silero VAD speech threshold (0..1).
 vad_threshold = {vad}
