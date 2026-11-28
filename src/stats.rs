@@ -1,4 +1,4 @@
-//! Statistics database (`%LOCALAPPDATA%\chatty\stats.db`). A writer thread
+//! Statistics database (`stats.db` in the data folder). A writer thread
 //! owns the connection; recording a dictation never blocks the pipeline.
 
 use std::collections::HashMap;
@@ -67,6 +67,18 @@ pub struct Local {
     pub weekday: i64,
 }
 
+#[cfg(target_os = "macos")]
+pub fn local(epoch_ms: i64) -> Local {
+    let t = crate::platform::local_tm(epoch_ms);
+    Local {
+        day: format!("{:04}-{:02}-{:02}", t.year, t.month, t.day),
+        time: format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second),
+        hour: t.hour as i64,
+        weekday: (t.weekday as i64 + 6) % 7,
+    }
+}
+
+#[cfg(windows)]
 pub fn local(epoch_ms: i64) -> Local {
     use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};

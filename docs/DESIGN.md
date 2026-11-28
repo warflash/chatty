@@ -1,6 +1,6 @@
 # chatty design note
 
-One Rust process, tray only. Hold Ctrl+Numpad / (sent by the mouse) to
+One Rust process, tray only (menu bar on macOS; see "macOS" at the end). Hold Ctrl+Numpad / (sent by the mouse) to
 dictate; release to paste; tap to press Enter.
 
 ## Crates
@@ -148,6 +148,17 @@ with `CHATTY_UPDATED_FROM` set, waits up to 30 s for the old process to
 release the single-instance mutex, and deletes the `*.old` files. Config
 and data live outside the install folder and are untouched.
 
+On macOS the updater looks for `chatty-X.Y.Z-macos-arm64.zip` (published
+on the same releases as the Windows zip), unpacks it
+with `ditto` into `~/Library/Application Support/chatty/update` and
+replaces the whole bundle: the running `chatty.app` is renamed to
+`chatty.app.old` and the new one moved into its place (put back on
+failure). The new executable is started directly (not through `open`) so
+it sees `CHATTY_UPDATED_FROM` and waits for the old process's lock file;
+it then deletes `chatty.app.old`. Builds not running from a `chatty.app`
+don't update. The bundle is ad-hoc signed, so macOS may ask for
+Accessibility again after an update.
+
 Debug builds and builds run from a `target` folder never update.
 `CHATTY_UPDATE_FEED=<url>` replaces the releases API URL for testing.
 
@@ -176,3 +187,56 @@ Debug builds and builds run from a `target` folder never update.
   including key repeats.
 * `chatty --bench <wav> [models]` and `--bench-cleanup <text> [model]`
   print per-stage timings.
+
+## macOS
+
+The engine, coordinator, text pipeline, cleanup, models, statistics, the
+immediate-mode window (pages, widgets) and the overlay's layout and drawing
+are shared. Each platform supplies the same small interfaces; the macOS
+files are picked with `#[cfg_attr(target_os = "macos", path = ...)]`:
+
+| Windows | macOS | What |
+|---|---|---|
+| `hook.rs` (WH_KEYBOARD_LL) | `mac/hook.rs` (Quartz event tap) | trigger, Escape |
+| `input.rs` (SendInput, UI Automation) | `mac/input.rs` (CGEventPost, AXUIElement) | ⌘V / Return, focused-field check |
+| `clipboard.rs` (delayed rendering) | `mac/clipboard.rs` (NSPasteboardItem data provider) | save, lazy set, read confirmation, restore |
+| `tray.rs` (Shell_NotifyIcon) | `mac/tray.rs` (NSStatusItem) | icon, menu |
+| `ui/gfx.rs` (Direct2D, DirectWrite) | `ui/gfx_mac.rs` (CoreGraphics, CoreText, SF Symbols) | drawing |
+| `ui/host_win.rs` (HWND) | `ui/host_mac.rs` (NSWindow + NSView) | window, input |
+| `overlay/win.rs` (layered window) | `overlay/mac.rs` (non-activating NSPanel) | overlay window |
+| `logi/win.rs` (HID file handles) | `logi/mac.rs` (IOHIDDevice) | HID++ transport |
+| `win.rs` (mutex, Run key, message loop) | `mac/mod.rs` (flock, LaunchAgent, NSApplication) | process |
+
+* AppKit is driven through `objc2`'s untyped `msg_send!` and a few small
+  runtime-built classes (the window and overlay views, a window delegate, a
+  menu target, a pasteboard provider); the C APIs are declared in `mac/sys.rs`. No Swift, no nib.
+* Every AppKit call runs on the main thread. Other threads post with
+  `mac::on_main` (libdispatch) or wait with `mac::main_sync`; the
+  pasteboard writes go through the main thread so AppKit calls the data
+  provider there while the engine thread waits for the read.
+* Both renderers draw the same DIP coordinates; on macOS into an offscreen
+  BGRA bitmap that becomes the view's layer contents (and `--render` writes
+  it as PNG). The Segoe Fluent Icons code points map to SF Symbols, tinted.
+  DirectWrite's uniform line spacing is reproduced by laying out lines with
+  `CTTypesetter` and placing baselines at 76 % of the line height.
+* The event tap swallows the trigger chord and (while recording) Escape.
+  Modifier-only triggers are observed, never swallowed. Keys chatty posts
+  carry a tag in `kCGEventSourceUserData`. A tap the system disabled after a
+  timeout is re-enabled from the callback.
+* Paste confirmation works as on Windows: the text is promised, not written;
+  the provider is asked only when an app reads it (no reader pid on macOS).
+  The item carries `org.nspasteboard.TransientType`, so clipboard managers
+  skip it.
+* Native libraries: transcribe.cpp's macOS Metal bundle links as
+  `libtranscribe.dylib` (found through rpaths `build.rs` adds: next to the
+  binary, the bundle's `Frameworks`, and `native/transcribe/lib` for dev
+  builds). llama.cpp's dylibs use versioned ggml names and their own
+  `@loader_path` rpath, so `dlopen` keeps them apart from transcribe.cpp's
+  ggml with no activation-context equivalent. The two Metal backends each
+  define a `GGMLMetalClass`; the runtime's duplicate-class warning is
+  harmless (both embed their shader library).
+* SQLite is the system `libsqlite3`; local time comes from `localtime_r`;
+  the config watcher is kqueue on the file and its folder (saves by rename).
+* Not ported: `foreground_blocks_input` (macOS has no integrity levels that
+  drop keys; secure input blocks the tap, not posting) and the process id of
+  the clipboard reader.

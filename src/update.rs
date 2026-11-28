@@ -3,13 +3,19 @@
 //! A background thread asks the GitHub API for the newest release on the
 //! configured channel ("stable": `releases/latest`; "beta": pre-releases
 //! too) at startup and every six hours. A newer release shows up as a button
-//! in the window's sidebar. Installing downloads the release zip into
-//! `%LOCALAPPDATA%\chatty\update`, checks its SHA-256, unpacks it and swaps
-//! the files next to chatty.exe: files in use are renamed to `*.old`, which
-//! Windows allows for a running exe and its DLLs. Then the new exe starts and
-//! this process exits; the new one waits for the single-instance mutex and
-//! deletes the `*.old` files. Config and data live elsewhere and stay as
-//! they are.
+//! in the window's sidebar. Installing downloads this platform's release zip
+//! into the data folder's `update`, checks its SHA-256 and unpacks it.
+//!
+//! Windows: swaps the files next to chatty.exe: files in use are renamed to
+//! `*.old`, which Windows allows for a running exe and its DLLs.
+//!
+//! macOS: replaces the whole `chatty.app`: the running bundle is renamed to
+//! `chatty.app.old` (a running app may be moved), the new one moved into its
+//! place.
+//!
+//! Then the new executable starts and this process exits; the new one waits
+//! for the single-instance lock and deletes the leftovers. Config and data
+//! live elsewhere and stay as they are.
 
 use std::cmp::Ordering;
 use std::io::{Read, Write};
@@ -20,7 +26,13 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+/// Where builds are published (both platforms' zips sit on the same releases).
 const RELEASES: &str = "https://api.github.com/repos/warflash/chatty/releases";
+/// The release asset for this platform ends with this.
+#[cfg(windows)]
+const ZIP_SUFFIX: &str = "-windows-x64.zip";
+#[cfg(target_os = "macos")]
+const ZIP_SUFFIX: &str = "-macos-arm64.zip";
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 /// Set on the process an update starts (to the old version); it waits for
 /// the old process to exit.
@@ -133,8 +145,8 @@ enum Checksum {
     Url(String),
 }
 
-/// A release object from the GitHub API, if it carries a Windows zip with a
-/// checksum. Drafts are skipped; pre-releases only when `pre` is set.
+/// A release object from the GitHub API, if it carries this platform's zip
+/// with a checksum. Drafts are skipped; pre-releases only when `pre` is set.
 fn parse_release(v: &serde_json::Value, pre: bool) -> Option<Release> {
     if v["draft"].as_bool() == Some(true) || (!pre && v["prerelease"].as_bool() == Some(true)) {
         return None;
@@ -143,7 +155,7 @@ fn parse_release(v: &serde_json::Value, pre: bool) -> Option<Release> {
     let version = Version::parse(tag)?;
     let assets = v["assets"].as_array()?;
     let name_of = |a: &serde_json::Value| a["name"].as_str().unwrap_or("").to_string();
-    let zip = assets.iter().find(|a| name_of(a).ends_with("-windows-x64.zip"))?;
+    let zip = assets.iter().find(|a| name_of(a).ends_with(ZIP_SUFFIX))?;
     let zip_name = name_of(zip);
     let digest = zip["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).filter(|h| h.len() == 64);
     let sha256 = match digest {
@@ -230,6 +242,10 @@ fn disabled_reason() -> Option<&'static str> {
     if exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")) {
         return Some("Running from the build folder, updates are off");
     }
+    #[cfg(target_os = "macos")]
+    if app_bundle().is_none() {
+        return Some("Not running from chatty.app, updates are off");
+    }
     None
 }
 
@@ -245,7 +261,12 @@ pub fn start(cfg: crate::config::Shared) {
     std::thread::Builder::new()
         .name("update".into())
         .spawn(move || {
+            #[cfg(windows)]
             remove_leftovers(&crate::paths::exe_dir());
+            #[cfg(target_os = "macos")]
+            if let Some(app) = app_bundle() {
+                remove_old_bundle(&app);
+            }
             let _ = std::fs::remove_dir_all(update_dir());
             loop {
                 let channel = cfg.get().update_channel.clone();
@@ -313,7 +334,7 @@ pub fn install() {
         .spawn(move || {
             log::info!("installing {}", release.tag);
             let progress = |f: f32| set(State::Installing(release.clone(), f));
-            match apply(&release, &crate::paths::exe_dir(), progress).and_then(|()| restart()) {
+            match apply(&release, progress).and_then(|()| restart()) {
                 Ok(()) => {}
                 Err(e) => {
                     log::error!("update to {}: {e}", release.tag);
@@ -325,8 +346,8 @@ pub fn install() {
         .expect("spawn update-install");
 }
 
-/// Downloads, verifies and unpacks `r`, then swaps it into `install_dir`.
-fn apply(r: &Release, install_dir: &Path, progress: impl Fn(f32)) -> Result<(), String> {
+/// Downloads, verifies and unpacks `r`, then swaps it into place.
+fn apply(r: &Release, progress: impl Fn(f32)) -> Result<(), String> {
     let dir = update_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -344,10 +365,7 @@ fn apply(r: &Release, install_dir: &Path, progress: impl Fn(f32)) -> Result<(), 
     }
     let unpacked = dir.join("new");
     unzip(&zip, &unpacked)?;
-    if !unpacked.join("chatty.exe").is_file() {
-        return Err("the release zip has no chatty.exe".into());
-    }
-    swap(&unpacked, install_dir)?;
+    install_unpacked(&unpacked)?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
@@ -380,7 +398,16 @@ fn download(url: &str, path: &Path, size: u64, progress: impl Fn(f32)) -> Result
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+#[cfg(windows)]
+fn install_unpacked(unpacked: &Path) -> Result<(), String> {
+    if !unpacked.join("chatty.exe").is_file() {
+        return Err("the release zip has no chatty.exe".into());
+    }
+    swap(unpacked, &crate::paths::exe_dir())
+}
+
 /// Unpacks with the tar.exe that ships with Windows (reads zip).
+#[cfg(windows)]
 fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -401,6 +428,7 @@ fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Files under `dir`, relative to it.
+#[cfg(windows)]
 fn files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![PathBuf::new()];
@@ -419,6 +447,7 @@ fn files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// `<file>.old`, or `<file>.old2`, ... when an earlier one can't be removed.
+#[cfg(windows)]
 fn old_name(p: &Path) -> PathBuf {
     let mut n = 1;
     loop {
@@ -435,6 +464,7 @@ fn old_name(p: &Path) -> PathBuf {
 
 /// Copies every file of `from` over `to`, moving replaced files aside as
 /// `*.old`. On an error, puts everything back.
+#[cfg(windows)]
 fn swap(from: &Path, to: &Path) -> Result<(), String> {
     let list = files(from).map_err(|e| e.to_string())?;
     // (target, where the replaced file went)
@@ -471,6 +501,7 @@ fn swap(from: &Path, to: &Path) -> Result<(), String> {
 
 /// Deletes `*.old` / `*.oldN` files left by an update, where the file they
 /// were replaced by exists.
+#[cfg(windows)]
 fn remove_leftovers(dir: &Path) {
     let Ok(list) = files(dir) else { return };
     for rel in list {
@@ -489,6 +520,7 @@ fn remove_leftovers(dir: &Path) {
 }
 
 /// Starts the freshly installed chatty.exe and exits this process.
+#[cfg(windows)]
 fn restart() -> Result<(), String> {
     let dir = crate::paths::exe_dir();
     std::process::Command::new(dir.join("chatty.exe"))
@@ -500,6 +532,100 @@ fn restart() -> Result<(), String> {
     crate::tray::remove_icon();
     log::logger().flush();
     std::process::exit(0);
+}
+
+// ------------------------------------------------------------------ macOS --
+
+/// The `chatty.app` this process runs from (`<app>/Contents/MacOS/chatty`).
+#[cfg(target_os = "macos")]
+fn app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let app = contents.parent()?;
+    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && app.extension()? == "app").then(|| app.to_path_buf())
+}
+
+/// `<bundle>.old`, where the running bundle goes during an update.
+#[cfg(target_os = "macos")]
+fn old_bundle(app: &Path) -> PathBuf {
+    let mut s = app.as_os_str().to_owned();
+    s.push(".old");
+    PathBuf::from(s)
+}
+
+/// Unpacks with ditto, which keeps the bundle's symlinks and signature.
+#[cfg(target_os = "macos")]
+fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("/usr/bin/ditto")
+        .args(["-x", "-k"])
+        .arg(zip)
+        .arg(to)
+        .output()
+        .map_err(|e| format!("ditto: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("ditto: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_unpacked(unpacked: &Path) -> Result<(), String> {
+    let new = unpacked.join("chatty.app");
+    if !new.join("Contents/MacOS/chatty").is_file() {
+        return Err("the release zip has no chatty.app".into());
+    }
+    let app = app_bundle().ok_or("not running from chatty.app")?;
+    replace_bundle(&new, &app)
+}
+
+/// Moves `app` aside to `<app>.old` and `new` into its place; on an error,
+/// puts the old bundle back.
+#[cfg(target_os = "macos")]
+fn replace_bundle(new: &Path, app: &Path) -> Result<(), String> {
+    let old = old_bundle(app);
+    if old.exists() {
+        std::fs::remove_dir_all(&old).map_err(|e| format!("{}: {e}", old.display()))?;
+    }
+    std::fs::rename(app, &old).map_err(|e| format!("{}: {e}", app.display()))?;
+    // A rename across volumes fails; ditto copies instead.
+    let moved = std::fs::rename(new, app).is_ok()
+        || std::process::Command::new("/usr/bin/ditto").arg(new).arg(app).status().is_ok_and(|s| s.success());
+    if !moved {
+        let _ = std::fs::remove_dir_all(app);
+        let _ = std::fs::rename(&old, app);
+        return Err(format!("could not move the new version to {}", app.display()));
+    }
+    Ok(())
+}
+
+/// Deletes the bundle an update moved aside, once its replacement exists.
+#[cfg(target_os = "macos")]
+fn remove_old_bundle(app: &Path) {
+    let old = old_bundle(app);
+    if old.is_dir() && app.join("Contents/MacOS/chatty").is_file() {
+        match std::fs::remove_dir_all(&old) {
+            Ok(()) => log::info!("removed {}", old.display()),
+            Err(e) => log::warn!("remove {}: {e}", old.display()),
+        }
+    }
+}
+
+/// Starts the freshly installed bundle's executable and exits this process.
+/// Started directly, not through `open`, so it gets `RESTART_ENV` and waits
+/// for this process's lock.
+#[cfg(target_os = "macos")]
+fn restart() -> Result<(), String> {
+    let app = app_bundle().ok_or("not running from chatty.app")?;
+    let exe = app.join("Contents/MacOS/chatty");
+    std::process::Command::new(&exe)
+        .current_dir(app.join("Contents/MacOS"))
+        .env(RESTART_ENV, env!("CARGO_PKG_VERSION"))
+        .spawn()
+        .map_err(|e| format!("start the new version: {e}"))?;
+    log::info!("restarting into the new version");
+    crate::mac::quit();
 }
 
 #[cfg(test)]
@@ -526,7 +652,7 @@ mod tests {
     }
 
     fn release_json(tag: &str, pre: bool, digest: bool) -> serde_json::Value {
-        let zip = format!("chatty-{}-windows-x64.zip", tag.trim_start_matches('v'));
+        let zip = format!("chatty-{}{ZIP_SUFFIX}", tag.trim_start_matches('v'));
         let mut asset = serde_json::json!({
             "name": zip, "size": 123,
             "browser_download_url": format!("https://example.test/{zip}"),
@@ -551,12 +677,17 @@ mod tests {
         assert_eq!(r.size, 123);
         assert_eq!(r.sha256, Checksum::Hex("ab".repeat(32)));
         let r = parse_release(&release_json("v0.2.0", false, false), false).unwrap();
-        assert_eq!(r.sha256, Checksum::Url("https://example.test/chatty-0.2.0-windows-x64.zip.sha256".into()));
+        assert_eq!(r.sha256, Checksum::Url(format!("https://example.test/chatty-0.2.0{ZIP_SUFFIX}.sha256")));
         assert!(parse_release(&release_json("v0.3.0-beta.1", true, true), false).is_none());
         assert!(parse_release(&release_json("v0.3.0-beta.1", true, true), true).is_some());
         let mut no_zip = release_json("v0.2.0", false, true);
         no_zip["assets"] = serde_json::json!([]);
         assert!(parse_release(&no_zip, false).is_none());
+        // Only this platform's zip counts.
+        let other = if cfg!(windows) { "-macos-arm64.zip" } else { "-windows-x64.zip" };
+        let mut foreign = release_json("v0.2.0", false, true);
+        foreign["assets"][0]["name"] = format!("chatty-0.2.0{other}").into();
+        assert!(parse_release(&foreign, false).is_none());
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -571,6 +702,7 @@ mod tests {
         std::fs::write(p, s).unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn swap_moves_old_files_aside_and_cleans_up() {
         let (new, inst) = (temp("swap-new"), temp("swap-inst"));
@@ -595,6 +727,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&inst);
     }
 
+    #[cfg(windows)]
     #[test]
     fn swap_rolls_back_on_error() {
         let (new, inst) = (temp("rb-new"), temp("rb-inst"));
@@ -607,6 +740,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(inst.join("a.txt")).unwrap(), "old a");
         assert!(!inst.join("a.txt.old").exists());
         assert_eq!(std::fs::read_to_string(inst.join("b")).unwrap(), "a file");
+        let _ = std::fs::remove_dir_all(&new);
+        let _ = std::fs::remove_dir_all(&inst);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_is_replaced_and_old_one_removed() {
+        let (new, inst) = (temp("app-new"), temp("app-inst"));
+        let (new_app, app) = (new.join("chatty.app"), inst.join("chatty.app"));
+        write(&new_app.join("Contents/MacOS/chatty"), "new exe");
+        write(&app.join("Contents/MacOS/chatty"), "old exe");
+        write(&app.join("Contents/Frameworks/gone.dylib"), "old lib");
+        replace_bundle(&new_app, &app).unwrap();
+        assert_eq!(std::fs::read_to_string(app.join("Contents/MacOS/chatty")).unwrap(), "new exe");
+        assert!(!app.join("Contents/Frameworks/gone.dylib").exists());
+        assert_eq!(std::fs::read_to_string(old_bundle(&app).join("Contents/MacOS/chatty")).unwrap(), "old exe");
+        remove_old_bundle(&app);
+        assert!(!old_bundle(&app).exists());
+        // A missing new bundle: the old one is put back.
+        assert!(replace_bundle(&new_app, &app).is_err());
+        assert_eq!(std::fs::read_to_string(app.join("Contents/MacOS/chatty")).unwrap(), "new exe");
         let _ = std::fs::remove_dir_all(&new);
         let _ = std::fs::remove_dir_all(&inst);
     }

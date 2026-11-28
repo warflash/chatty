@@ -99,7 +99,10 @@ name = "chatty"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "libc",
  "log",
+ "objc2",
+ "objc2-foundation",
  "rtrb",
  "serde",
  "serde_json",

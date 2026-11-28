@@ -1,7 +1,11 @@
-//! Embeds `assets/chatty.ico` as the executable's icon (resource id 1).
+//! Windows: embeds `assets/chatty.ico` as the executable's icon (resource
+//! id 1). Writes the compiled resource (.res) directly and hands it to the
+//! MSVC linker, so the build needs neither rc.exe nor a crate for it.
 //!
-//! Writes the compiled resource (.res) directly and hands it to the MSVC
-//! linker, so the build needs neither rc.exe nor a crate for it.
+//! macOS: the binary finds `libtranscribe.dylib` (and its ggml dylibs) next to
+//! itself or in an app bundle's `Contents/Frameworks`, and in a dev build in
+//! the fetched `native/transcribe/lib`. The sys crate's own rpath does not
+//! reach downstream binaries.
 
 use std::path::PathBuf;
 
@@ -9,6 +13,12 @@ fn main() {
     let ico_path = "assets/chatty.ico";
     println!("cargo:rerun-if-changed={ico_path}");
     println!("cargo:rerun-if-changed=build.rs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("native/transcribe/lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dev.display());
+    }
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
     }

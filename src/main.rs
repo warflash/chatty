@@ -1,68 +1,52 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!("chatty runs on Windows and macOS");
 
 mod audio;
 mod bench;
 mod cleanup;
+#[cfg_attr(target_os = "macos", path = "mac/clipboard.rs")]
 mod clipboard;
 mod config;
 mod coordinator;
 mod engine;
+#[cfg_attr(target_os = "macos", path = "mac/hook.rs")]
 mod hook;
+#[cfg_attr(target_os = "macos", path = "mac/input.rs")]
 mod input;
 mod llama;
 mod logger;
 mod logi;
+#[cfg(target_os = "macos")]
+mod mac;
 mod models;
 mod overlay;
 mod paths;
+mod platform;
 mod sqlite;
 mod stats;
 mod status;
 mod text;
+#[cfg_attr(target_os = "macos", path = "mac/tray.rs")]
 mod tray;
 mod ui;
 mod update;
 mod wav;
+#[cfg(windows)]
+mod win;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
-
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, TranslateMessage};
-use windows::core::w;
 
 use coordinator::{Effect, Input, Machine};
 use hook::KeyEvent;
 use tray::TrayState;
 
-fn set_autostart(enabled: bool) {
-    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW};
-    let key = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    // Never register a dev build, or a release build run from cargo's target dir.
-    let exe = std::env::current_exe().unwrap_or_default();
-    if cfg!(debug_assertions) || exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")) {
-        return;
-    }
-    unsafe {
-        if enabled {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let value: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain(Some(0)).collect();
-            let _ = RegSetKeyValueW(
-                HKEY_CURRENT_USER,
-                key,
-                w!("chatty"),
-                REG_SZ.0,
-                Some(value.as_ptr() as *const _),
-                (value.len() * 2) as u32,
-            );
-        } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, w!("chatty"));
-        }
-    }
-}
+#[cfg(windows)]
+use win as os;
+#[cfg(target_os = "macos")]
+use mac as os;
 
 /// The coordinator thread: feeds key events to the state machine and
 /// executes its effects. Never blocks on the pipeline.
@@ -148,23 +132,12 @@ fn main() {
     // Started by an update: the old process is still shutting down.
     let updated_from = std::env::var(update::RESTART_ENV).ok();
     let deadline = Instant::now() + Duration::from_secs(30);
-    unsafe {
-        loop {
-            let mutex = CreateMutexW(None, true, w!("Local\\chatty-single-instance"));
-            if GetLastError() != ERROR_ALREADY_EXISTS {
-                std::mem::forget(mutex);
-                break;
-            }
-            if updated_from.is_none() || Instant::now() > deadline {
-                log::info!("already running");
-                return;
-            }
-            if let Ok(h) = mutex {
-                let _ = CloseHandle(h);
-            }
-            std::thread::sleep(Duration::from_millis(100));
+    while !os::single_instance() {
+        if updated_from.is_none() || Instant::now() > deadline {
+            log::info!("already running");
+            return;
         }
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        std::thread::sleep(Duration::from_millis(100));
     }
     let t0 = Instant::now();
     log::info!("chatty {} starting ({})", env!("CARGO_PKG_VERSION"), paths::exe_dir().display());
@@ -190,6 +163,7 @@ fn main() {
     let (coord_tx, coord_rx) = mpsc::channel::<KeyEvent>();
     let engine = engine::spawn(cfg.clone(), coord_tx.clone(), stats.clone(), audio_ctl.clone(), capture);
     logi::start(coord_tx.clone(), cfg.get().mouse_button);
+    hook::set_trigger(&cfg.get().trigger);
     hook::start(coord_tx);
     {
         let (engine, cfg, stats) = (engine.clone(), cfg.clone(), stats.clone());
@@ -206,12 +180,15 @@ fn main() {
                 audio_ctl.close();
             }
             if old.autostart != new.autostart {
-                set_autostart(new.autostart);
+                os::set_autostart(new.autostart);
             }
             overlay::ENABLED.store(new.overlay, std::sync::atomic::Ordering::Relaxed);
             if old.font != new.font {
                 ui::gfx::set_font(&new.font);
                 ui::notify();
+            }
+            if old.trigger != new.trigger {
+                hook::set_trigger(&new.trigger);
             }
             if old.mouse_button != new.mouse_button {
                 logi::set_enabled(new.mouse_button);
@@ -223,28 +200,6 @@ fn main() {
             tray::set_tooltip("");
         });
     }
-    set_autostart(cfg.get().autostart);
-
-    let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }.map(|h| HINSTANCE(h.0)).unwrap_or_default();
-    overlay::create(instance);
-    ui::init(cfg.clone(), Some(engine.clone()));
-    let main_hwnd = tray::create(instance, tray::Actions { cfg: cfg.clone() });
-    clipboard::OWNER.store(main_hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
-    engine.send(engine::Cmd::Warm);
-    update::start(cfg.clone());
-    if updated_from.is_some() {
-        overlay::notice(&format!("Updated to {}", env!("CARGO_PKG_VERSION")));
-    }
-    log::info!("ready in {:?}", t0.elapsed());
-
-    unsafe {
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    logi::shutdown();
-    overlay::shutdown();
-    tray::remove_icon();
+    os::set_autostart(cfg.get().autostart);
+    os::run(cfg, engine, updated_from.is_some(), t0);
 }

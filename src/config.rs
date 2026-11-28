@@ -1,4 +1,5 @@
-//! `config.toml`: next to the exe if present there, else `%APPDATA%\chatty`.
+//! `config.toml`: next to the exe if present there, else `%APPDATA%\chatty`
+//! (macOS: `~/Library/Application Support/chatty`).
 //! Reloaded on change. There is no settings UI; the tray menu edits the few
 //! keys it switches (model, language, cleanup) in place with `toml_edit`, so
 //! comments survive.
@@ -92,14 +93,17 @@ impl Default for Cleanup {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Input device name as Windows shows it; empty = system default.
+    /// Input device name as the OS shows it; empty = system default.
     pub microphone: String,
+    /// macOS only: "ctrl+numpad_divide", "right_option", "right_command" or
+    /// "fn". Windows always uses Ctrl+Numpad /.
+    pub trigger: String,
     pub hold_threshold_ms: u64,
     /// Speech model id from `models::ASR`.
     pub model: String,
     /// "auto", "en", "de", ...
     pub language: String,
-    /// "auto", "vulkan" or "cpu".
+    /// "auto", "vulkan" (Windows), "metal" (macOS) or "cpu".
     pub backend: String,
     /// Unload the speech model after this many idle minutes (0 = never).
     pub idle_unload_minutes: u64,
@@ -148,6 +152,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             microphone: String::new(),
+            trigger: "ctrl+numpad_divide".into(),
             hold_threshold_ms: 300,
             model: "parakeet-unified-en-0.6b".into(),
             language: "auto".into(),
@@ -189,8 +194,12 @@ struct HandySeed {
 }
 
 fn read_handy_seed() -> HandySeed {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return HandySeed::default() };
-    let path = Path::new(&appdata).join("com.pais.handy").join("settings_store.json");
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
+    let Some(base) = base else { return HandySeed::default() };
+    let path = base.join("com.pais.handy").join("settings_store.json");
     let Ok(text) = std::fs::read_to_string(&path) else { return HandySeed::default() };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return HandySeed::default() };
     let s = &json["settings"];
@@ -224,9 +233,9 @@ fn template(seed: &HandySeed) -> String {
     format!(
         r#"# chatty configuration. Saved changes apply immediately.
 
-# Input device name as Windows shows it ("" = system default).
+# Input device name as {os} shows it ("" = system default).
 microphone = {mic}
-
+{trigger}
 # Hold the trigger this long to record; a shorter tap presses Enter.
 hold_threshold_ms = {hold}
 
@@ -237,7 +246,7 @@ hold_threshold_ms = {hold}
 model = "{model}"
 # "auto", or a language code such as "en" or "de".
 language = "auto"
-# "auto" (GPU when available), "vulkan" or "cpu".
+# "auto" (GPU when available), "{gpu}" or "cpu".
 backend = "auto"
 # Unload the speech model after this many idle minutes (0 = never).
 idle_unload_minutes = {idle}
@@ -284,7 +293,7 @@ auto_enter = false
 # Without auto_enter: add a space after the text so the next dictation
 # doesn't run into it.
 trailing_space = true
-# Font for the overlay and window: "" (Segoe UI Variable), an installed
+# Font for the overlay and window: "" ({font}), an installed
 # family like "Inter", or a path to a .ttf file.
 font = ""
 # Updates from GitHub releases: "stable", "beta" (pre-releases too) or "off".
@@ -312,6 +321,16 @@ max_edit_ratio = {maxe}
 gpu_layers = 99
 "#,
         mic = toml_str(&mic),
+        os = crate::platform::OS_NAME,
+        gpu = crate::platform::GPU_BACKEND,
+        font = crate::platform::DEFAULT_FONT,
+        trigger = if cfg!(target_os = "macos") {
+            "\n# What you hold to dictate: \"ctrl+numpad_divide\" (Control + keypad /, or a\n\
+             # mouse button mapped to it), \"right_option\", \"right_command\" or \"fn\".\n\
+             trigger = \"ctrl+numpad_divide\"\n"
+        } else {
+            ""
+        },
         hold = seed.hold_threshold.unwrap_or(d.hold_threshold_ms),
         model = d.model,
         idle = d.idle_unload_minutes,
@@ -423,8 +442,35 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Re-reads the config after a change notification; calls `on_change` when
+/// it parsed and differs.
+fn reload(shared: &Shared, path: &Path, last: &mut Option<SystemTime>, on_change: &impl Fn(&Config, &Config)) {
+    let now = mtime(path);
+    if now == *last {
+        return;
+    }
+    *last = now;
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    match parse(&text) {
+        Ok(config) => {
+            let old = shared.get();
+            if *old == config {
+                return;
+            }
+            let new = shared.replace(config);
+            log::info!("config reloaded");
+            on_change(&old, &new);
+        }
+        Err(e) => {
+            log::error!("config not reloaded: {e}");
+            crate::overlay::notice(&format!("config.toml: {}", e.lines().next().unwrap_or("")));
+        }
+    }
+}
+
 /// Watches the config's directory and calls `on_change(old, new)` after a
 /// successful reload. Blocks in the kernel between changes (no polling).
+#[cfg(windows)]
 pub fn watch(shared: Shared, on_change: impl Fn(&Config, &Config) + Send + 'static) {
     use windows::Win32::Foundation::WAIT_OBJECT_0;
     use windows::Win32::Storage::FileSystem::{
@@ -460,30 +506,69 @@ pub fn watch(shared: Shared, on_change: impl Fn(&Config, &Config) + Send + 'stat
                 // Editors write in several steps; let them finish.
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 let _ = unsafe { FindNextChangeNotification(handle) };
-                let now = mtime(&path);
-                if now == last {
-                    continue;
-                }
-                last = now;
-                let text = match std::fs::read_to_string(&path) {
-                    Ok(t) => t,
-                    Err(_) => continue,
+                reload(&shared, &path, &mut last, &on_change);
+            }
+        })
+        .expect("spawn config watcher");
+}
+
+/// Watches the config file and its directory with kqueue (editors that save
+/// by rename only touch the directory) and calls `on_change(old, new)` after
+/// a successful reload. Blocks in the kernel between changes.
+#[cfg(target_os = "macos")]
+pub fn watch(shared: Shared, on_change: impl Fn(&Config, &Config) + Send + 'static) {
+    std::thread::Builder::new()
+        .name("config-watch".into())
+        .spawn(move || {
+            let path = shared.path.as_ref().clone();
+            let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let open = |p: &Path| {
+                let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap_or_default();
+                unsafe { libc::open(c.as_ptr(), libc::O_EVTONLY) }
+            };
+            let kq = unsafe { libc::kqueue() };
+            let dir_fd = open(&dir);
+            if kq < 0 || dir_fd < 0 {
+                log::error!("config watch failed: {}", std::io::Error::last_os_error());
+                return;
+            }
+            let watch_fd = |fd: i32| {
+                let ev = libc::kevent {
+                    ident: fd as usize,
+                    filter: libc::EVFILT_VNODE,
+                    flags: libc::EV_ADD | libc::EV_CLEAR,
+                    fflags: libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_RENAME | libc::NOTE_DELETE | libc::NOTE_ATTRIB,
+                    data: 0,
+                    udata: std::ptr::null_mut(),
                 };
-                match parse(&text) {
-                    Ok(config) => {
-                        let old = shared.get();
-                        if *old == config {
-                            continue;
-                        }
-                        let new = shared.replace(config);
-                        log::info!("config reloaded");
-                        on_change(&old, &new);
+                unsafe { libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            };
+            watch_fd(dir_fd);
+            let mut file_fd = open(&path);
+            if file_fd >= 0 {
+                watch_fd(file_fd);
+            }
+            let mut last = mtime(&path);
+            loop {
+                let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+                let n = unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, std::ptr::null()) };
+                if n < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
                     }
-                    Err(e) => {
-                        log::error!("config not reloaded: {e}");
-                        crate::overlay::notice(&format!("config.toml: {}", e.lines().next().unwrap_or("")));
-                    }
+                    return;
                 }
+                // Editors write in several steps; let them finish.
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                // A save by rename replaces the file: watch the new one.
+                if file_fd >= 0 {
+                    unsafe { libc::close(file_fd) };
+                }
+                file_fd = open(&path);
+                if file_fd >= 0 {
+                    watch_fd(file_fd);
+                }
+                reload(&shared, &path, &mut last, &on_change);
             }
         })
         .expect("spawn config watcher");

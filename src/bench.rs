@@ -10,6 +10,10 @@ use transcribe_cpp::{Model, ModelOptions, RunOptions};
 
 use crate::models;
 
+#[cfg(target_os = "macos")]
+fn attach_console() {}
+
+#[cfg(windows)]
 fn attach_console() {
     use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     unsafe {
@@ -155,7 +159,7 @@ fn bench_cleanup(text: &str, id: Option<&str>) -> Result<(), String> {
     ensure(&spec.asset)?;
     let t = Instant::now();
     let mut c = crate::cleanup::Cleaner::load(spec, &cfg)?;
-    println!("{} loaded in {:.0} ms (incl. warm-up; total {:.0} ms with DLLs)", spec.id, c.load_ms, ms(t));
+    println!("{} loaded in {:.0} ms (incl. warm-up; total {:.0} ms with libraries)", spec.id, c.load_ms, ms(t));
     for i in 0..5 {
         let r = c.clean(text, Some("en"), &cfg);
         println!(
@@ -171,6 +175,12 @@ fn bench_cleanup(text: &str, id: Option<&str>) -> Result<(), String> {
 
 /// Checks delayed-rendering paste confirmation without keystrokes: a reader
 /// thread plays the target app. The user's clipboard is saved and restored.
+#[cfg(target_os = "macos")]
+fn clipboard_test() -> Result<(), String> {
+    crate::mac::clipboard_test()
+}
+
+#[cfg(windows)]
 fn clipboard_test() -> Result<(), String> {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -252,6 +262,7 @@ fn clipboard_test() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn saved_len(s: &crate::clipboard::Saved) -> usize {
     s.len()
 }

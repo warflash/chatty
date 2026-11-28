@@ -839,6 +839,7 @@ impl Worker {
         let backend = match cfg.backend.as_str() {
             "cpu" => Backend::Cpu,
             "vulkan" => Backend::Vulkan,
+            "metal" => Backend::Metal,
             _ => Backend::Auto,
         };
         let model = Model::load_with(spec.asset.path(), &ModelOptions { backend, ..Default::default() })

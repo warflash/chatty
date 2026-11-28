@@ -569,7 +569,7 @@ fn paint(hwnd: HWND) -> Option<(Vec<Action>, Option<Cmd>, bool)> {
 }
 
 fn set_mouse(hwnd: HWND, lparam: LPARAM, button: Option<bool>) {
-    let p = super::mouse_pos(hwnd, lparam);
+    let p = super::host::mouse_pos(hwnd, lparam);
     with_fly(|f| {
         f.input.mouse = p;
         if let Some(down) = button {
