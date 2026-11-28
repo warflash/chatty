@@ -10,6 +10,7 @@ use std::ffi::{c_char, c_void};
 // nothing would make the linker load them; NSFont, NSImage, NSApplication,
 // CATransaction ... would not exist.
 #[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {}
 
@@ -97,8 +98,12 @@ unsafe extern "C" {
     pub fn CFSetGetCount(s: CFSetRef) -> CFIndex;
     pub fn CFSetGetValues(s: CFSetRef, values: *mut CFTypeRef);
 
-    pub fn CFAttributedStringCreateMutable(alloc: CFAllocatorRef, max: CFIndex) -> CFMutableAttributedStringRef;
-    pub fn CFAttributedStringReplaceString(s: CFMutableAttributedStringRef, range: CFRange, with: CFStringRef);
+    pub fn CFAttributedStringCreate(alloc: CFAllocatorRef, s: CFStringRef, attrs: CFDictionaryRef) -> CFAttributedStringRef;
+    pub fn CFAttributedStringCreateMutableCopy(
+        alloc: CFAllocatorRef,
+        max: CFIndex,
+        s: CFAttributedStringRef,
+    ) -> CFMutableAttributedStringRef;
     pub fn CFAttributedStringSetAttribute(s: CFMutableAttributedStringRef, range: CFRange, name: CFStringRef, value: CFTypeRef);
 
     pub fn CFURLCreateFromFileSystemRepresentation(

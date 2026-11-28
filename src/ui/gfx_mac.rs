@@ -527,24 +527,24 @@ impl Gfx {
     fn attributed(&mut self, s: &str, font: Font, c1: Color, split: Option<(usize, Color)>) -> Cf {
         let ct = self.ct_font(font);
         unsafe {
-            let m = CFAttributedStringCreateMutable(std::ptr::null(), 0);
+            // Text and attributes at once: characters inserted into an empty
+            // mutable attributed string have no attribute dictionary, and
+            // setting the first attribute on them crashes.
             let text = Cf::str(s);
-            CFAttributedStringReplaceString(m, CFRange { location: 0, length: 0 }, text.as_ptr());
+            let col = Cf(CGColorCreateSRGB(c1.0 as f64, c1.1 as f64, c1.2 as f64, c1.3 as f64) as CFTypeRef);
+            let attrs = dict(&[(kCTFontAttributeName, ct), (kCTForegroundColorAttributeName, col.as_ptr())]);
+            let base = Cf(CFAttributedStringCreate(std::ptr::null(), text.as_ptr(), attrs.as_ptr()));
             let n = utf16_len(s);
-            let all = CFRange { location: 0, length: n };
-            CFAttributedStringSetAttribute(m, all, kCTFontAttributeName, ct);
-            let col = CGColorCreateSRGB(c1.0 as f64, c1.1 as f64, c1.2 as f64, c1.3 as f64);
-            CFAttributedStringSetAttribute(m, all, kCTForegroundColorAttributeName, col as CFTypeRef);
-            CGColorRelease(col);
-            if let Some((at, c2)) = split {
-                let at = (at as CFIndex).min(n);
-                if at < n {
-                    let col = CGColorCreateSRGB(c2.0 as f64, c2.1 as f64, c2.2 as f64, c2.3 as f64);
-                    CFAttributedStringSetAttribute(m, CFRange { location: at, length: n - at }, kCTForegroundColorAttributeName, col as CFTypeRef);
-                    CGColorRelease(col);
+            match split {
+                Some((at, c2)) if (at as CFIndex) < n => {
+                    let m = CFAttributedStringCreateMutableCopy(std::ptr::null(), 0, base.as_ptr());
+                    let col2 = Cf(CGColorCreateSRGB(c2.0 as f64, c2.1 as f64, c2.2 as f64, c2.3 as f64) as CFTypeRef);
+                    let at = at as CFIndex;
+                    CFAttributedStringSetAttribute(m, CFRange { location: at, length: n - at }, kCTForegroundColorAttributeName, col2.as_ptr());
+                    Cf(m as CFTypeRef)
                 }
+                _ => base,
             }
-            Cf(m as CFTypeRef)
         }
     }
 
