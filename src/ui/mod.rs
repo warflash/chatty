@@ -762,14 +762,15 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
     actions
 }
 
+const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon-128.png");
+
 fn sidebar(ui: &mut Ui, current: Page, h: f32, nav_to: &mut Option<Page>) {
     let status = crate::status::get();
     ui.g.fill(Rect::new(0.0, 0.0, SIDEBAR_W, h), 0.0, theme::SIDEBAR);
-    // Brand: gradient tile with the mic glyph.
+    // Brand: the app icon (assets/icon-128.png, same art as chatty.ico).
     let logo = Rect::new(20.0, 22.0, 34.0, 34.0);
     ui.g.glow(logo.x + 17.0, logo.y + 17.0, 40.0, theme::ACCENT.alpha(0.18));
-    ui.g.gradient(logo, 10.0, theme::ACCENT, theme::ACCENT2);
-    ui.icon(icon::MIC, logo, 16.0, Color::white(1.0));
+    ui.g.image(APP_ICON_PNG, logo);
     ui.g.label("chatty", Font::display(19.0), Rect::new(66.0, 20.0, 150.0, 24.0), theme::TEXT, Align::Left);
     let (dot, word) = phase_style(status.phase);
     ui.g.circle(70.0, 49.0, 3.5, dot);

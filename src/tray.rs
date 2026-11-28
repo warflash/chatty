@@ -61,12 +61,11 @@ pub fn set_state(s: TrayState) {
     }
 }
 
-/// The window/taskbar icon: the exe's embedded icon (build.rs, resource 1),
-/// or the idle tray glyph if that is missing.
+/// The window/taskbar icon: the exe's embedded icon (build.rs, resource 1).
 pub fn app_icon() -> HICON {
     unsafe {
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
-        LoadIconW(Some(instance.into()), windows::core::PCWSTR(1 as *const u16)).unwrap_or_else(|_| icon_for(TrayState::Idle))
+        LoadIconW(Some(instance.into()), windows::core::PCWSTR(1 as *const u16)).unwrap_or_default()
     }
 }
 
@@ -85,47 +84,111 @@ fn state() -> TrayState {
     }
 }
 
-/// 32x32 anti-aliased circle icon: filled while active, a ring with a dot
-/// otherwise.
-fn make_icon(rgb: (u8, u8, u8), filled: bool) -> HICON {
-    const N: usize = 32;
-    let mut bgra = vec![0u8; N * N * 4];
-    let c = (N as f32 - 1.0) / 2.0;
-    for y in 0..N {
-        for x in 0..N {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            let cover = |r: f32| (r - d + 0.5).clamp(0.0, 1.0);
-            let a = if filled {
-                cover(13.0)
-            } else {
-                let ring = (cover(13.0) - cover(10.0)).max(0.0);
-                (ring + cover(5.0)).min(1.0)
-            };
-            let i = (y * N + x) * 4;
-            bgra[i] = rgb.2;
-            bgra[i + 1] = rgb.1;
-            bgra[i + 2] = rgb.0;
-            bgra[i + 3] = (a * 255.0) as u8;
+/// Tray icon: the app icon at the small-icon size, with a status dot in the
+/// bottom-right corner while not idle (greyed out on error). Rebuilt when the
+/// small-icon size changes (DPI change).
+fn icon_for(s: TrayState) -> HICON {
+    static ICONS: Mutex<(i32, [isize; 5])> = Mutex::new((0, [0; 5]));
+    let n = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    let mut icons = ICONS.lock().unwrap();
+    if icons.0 != n {
+        for h in icons.1 {
+            if h != 0 {
+                unsafe {
+                    let _ = DestroyIcon(HICON(h as *mut _));
+                }
+            }
         }
+        let base = app_pixels(n);
+        let make = |badge: Option<(u8, u8, u8)>, grey: bool| match &base {
+            Some(px) => badged_icon(px, n as usize, badge, grey).0 as isize,
+            None => 0,
+        };
+        *icons = (
+            n,
+            [
+                make(None, false),
+                make(Some((232, 59, 59)), false),
+                make(Some((245, 165, 30)), false),
+                make(Some((59, 138, 208)), false),
+                make(Some((232, 59, 59)), true),
+            ],
+        );
     }
-    let and_mask = vec![0u8; N * N / 8];
+    HICON(icons.1[s as usize] as *mut _)
+}
+
+/// The embedded app icon's `n` x `n` frame as straight-alpha BGRA rows, top
+/// first.
+fn app_pixels(n: i32) -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::*;
     unsafe {
-        CreateIcon(None, N as i32, N as i32, 1, 32, and_mask.as_ptr(), bgra.as_ptr()).unwrap_or_default()
+        let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).ok()?;
+        let h = LoadImageW(Some(instance.into()), windows::core::PCWSTR(1 as *const u16), IMAGE_ICON, n, n, LR_DEFAULTCOLOR).ok()?;
+        let icon = HICON(h.0);
+        let mut info = ICONINFO::default();
+        let got = GetIconInfo(icon, &mut info);
+        let _ = DestroyIcon(icon);
+        got.ok()?;
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: n,
+                biHeight: -n,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut px = vec![0u8; (n * n * 4) as usize];
+        let dc = GetDC(None);
+        let lines = GetDIBits(dc, info.hbmColor, 0, n as u32, Some(px.as_mut_ptr().cast()), &mut bmi, DIB_RGB_COLORS);
+        ReleaseDC(None, dc);
+        let _ = DeleteObject(info.hbmColor.into());
+        let _ = DeleteObject(info.hbmMask.into());
+        (lines == n).then_some(px)
     }
 }
 
-fn icon_for(s: TrayState) -> HICON {
-    static ICONS: OnceLock<[isize; 5]> = OnceLock::new();
-    let icons = ICONS.get_or_init(|| {
-        [
-            make_icon((200, 200, 200), false).0 as isize,
-            make_icon((232, 59, 59), true).0 as isize,
-            make_icon((245, 165, 30), true).0 as isize,
-            make_icon((59, 138, 208), false).0 as isize,
-            make_icon((150, 40, 40), false).0 as isize,
-        ]
-    });
-    HICON(icons[s as usize] as *mut _)
+/// Copies `base`, optionally greys it, and paints a status dot with a
+/// transparent gap around it into the bottom-right corner.
+fn badged_icon(base: &[u8], n: usize, badge: Option<(u8, u8, u8)>, grey: bool) -> HICON {
+    let mut px = base.to_vec();
+    if grey {
+        for p in px.chunks_exact_mut(4) {
+            let l = (0.114 * p[0] as f32 + 0.587 * p[1] as f32 + 0.299 * p[2] as f32) * 0.8;
+            p[0] = l as u8;
+            p[1] = l as u8;
+            p[2] = l as u8;
+        }
+    }
+    if let Some(rgb) = badge {
+        let nf = n as f32;
+        let r = nf * 0.22;
+        let gap = r + (nf / 16.0).max(1.0);
+        let c = nf - r - 0.5;
+        for y in 0..n {
+            for x in 0..n {
+                let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
+                let cover = |rad: f32| (rad - d + 0.5).clamp(0.0, 1.0);
+                let p = &mut px[(y * n + x) * 4..][..4];
+                // Cut the gap, then lay the dot over it (straight alpha).
+                let da = p[3] as f32 / 255.0 * (1.0 - cover(gap));
+                let sa = cover(r);
+                let oa = sa + da * (1.0 - sa);
+                if oa > 0.0 {
+                    for (ch, sc) in [(0, rgb.2), (1, rgb.1), (2, rgb.0)] {
+                        p[ch] = ((sc as f32 * sa + p[ch] as f32 * da * (1.0 - sa)) / oa).round() as u8;
+                    }
+                }
+                p[3] = (oa * 255.0).round() as u8;
+            }
+        }
+    }
+    let and_mask = vec![0u8; n.div_ceil(32) * 4 * n];
+    unsafe { CreateIcon(None, n as i32, n as i32, 1, 32, and_mask.as_ptr(), px.as_ptr()).unwrap_or_default() }
 }
 
 fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {

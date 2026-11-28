@@ -194,6 +194,9 @@ pub struct Gfx {
     brush: ID2D1SolidColorBrush,
     dw: IDWriteFactory,
     formats: HashMap<FormatKey, IDWriteTextFormat>,
+    /// Decoded PNGs keyed by (data address, pixel width, pixel height); None
+    /// when decoding failed, so it is not retried every frame.
+    images: HashMap<(usize, u32, u32), Option<ID2D1Bitmap>>,
     icon_family: HSTRING,
     font_gen: u32,
     custom: Option<(HSTRING, Option<IDWriteFontCollection>)>,
@@ -251,7 +254,7 @@ impl Gfx {
                     }
                 }
             }
-            Ok(Gfx { rt, hwnd_rt: None, brush, dw, formats: HashMap::new(), icon_family, font_gen: u32::MAX, custom: None, dpi })
+            Ok(Gfx { rt, hwnd_rt: None, brush, dw, formats: HashMap::new(), images: HashMap::new(), icon_family, font_gen: u32::MAX, custom: None, dpi })
         }
     }
 
@@ -309,6 +312,26 @@ impl Gfx {
             let d = i as f32 * 2.0;
             let rr = Rect::new(r.x - d * 0.5, r.y + d * 0.6, r.w + d, r.h + d);
             self.fill(rr, radius + d * 0.5, Color(0.0, 0.0, 0.0, strength / (i as f32 + 1.0)));
+        }
+    }
+
+    /// Draws an embedded PNG into `r`. WIC scales it to the target's pixel
+    /// size once per size (Direct2D's own bitmap scaling is bilinear and
+    /// aliases on large reductions).
+    pub fn image(&mut self, png: &'static [u8], r: Rect) {
+        let scale = self.dpi / 96.0;
+        let (pw, ph) = (((r.w * scale).round() as u32).max(1), ((r.h * scale).round() as u32).max(1));
+        let key = (png.as_ptr() as usize, pw, ph);
+        let rt = &self.rt;
+        let bitmap = self.images.entry(key).or_insert_with(|| match unsafe { decode_png(rt, png, pw, ph) } {
+            Ok(b) => Some(b),
+            Err(e) => {
+                log::warn!("image decode: {e}");
+                None
+            }
+        });
+        if let Some(b) = bitmap {
+            unsafe { self.rt.DrawBitmap(&*b, Some(&r.d2d()), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
         }
     }
 
@@ -639,5 +662,26 @@ impl Gfx {
             // D2DERR_RECREATE_TARGET
             Err(e) => e.code() != windows::core::HRESULT(0x8899_000C_u32 as i32),
         }
+    }
+}
+
+/// PNG bytes to a premultiplied Direct2D bitmap of `w` x `h` pixels.
+unsafe fn decode_png(rt: &ID2D1RenderTarget, png: &[u8], w: u32, h: u32) -> windows::core::Result<ID2D1Bitmap> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::*;
+    unsafe {
+        // Already initialised on this thread (either model) is fine.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let stream = wic.CreateStream()?;
+        stream.InitializeFromMemory(png)?;
+        let decoder = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?;
+        let frame = decoder.GetFrame(0)?;
+        // Premultiply before scaling so edges don't pick up dark fringes.
+        let pbgra = wic.CreateFormatConverter()?;
+        pbgra.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
+        let scaler = wic.CreateBitmapScaler()?;
+        scaler.Initialize(&pbgra, w, h, WICBitmapInterpolationModeHighQualityCubic)?;
+        rt.CreateBitmapFromWicBitmap(&scaler, None)
     }
 }
