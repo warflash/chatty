@@ -212,73 +212,22 @@ pub fn quit() -> ! {
 
 /// `chatty --clipboard-test`: checks lazy-provider paste confirmation with
 /// `pbpaste` as the foreign reader. The user's clipboard is saved and
-/// restored. AppKit's run loop serves the provider meanwhile.
+/// restored, whether the checks pass or not. AppKit's run loop serves the
+/// provider meanwhile.
 pub fn clipboard_test() -> Result<(), String> {
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
     // As in the app: a menu bar (accessory) process.
     set_regular(false);
     let result: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
     let out = result.clone();
     std::thread::spawn(move || {
         let r = (|| -> Result<(), String> {
-            // pbpaste waits for the provider; never let it hang the test.
-            let read_foreign = || -> Result<String, String> {
-                let mut child = std::process::Command::new("/usr/bin/pbpaste")
-                    .stdout(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|e| e.to_string())?;
-                let t = Instant::now();
-                while child.try_wait().map_err(|e| e.to_string())?.is_none() {
-                    if t.elapsed() > Duration::from_secs(5) {
-                        let _ = child.kill();
-                        let calls = crate::clipboard::PROVIDE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
-                        return Err(format!("pbpaste got no answer in 5 s (provider asked {calls} times)"));
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                let o = child.wait_with_output().map_err(|e| e.to_string())?;
-                Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-            };
             let saved = crate::clipboard::save()?;
             println!("saved {} clipboard items", saved.len());
-
-            // 1. A reader 80 ms after "⌘V": confirmed, with the right text.
-            let text = "chatty clipboard test äöü 👍";
-            crate::clipboard::set_text_deferred(text)?.ok_or("no provider")?;
-            std::thread::sleep(Duration::from_millis(60));
-            println!("   refused before arm: {:?}", crate::clipboard::arm());
-            let sent = Instant::now();
-            let reader = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(80));
-                read_foreign()
-            });
-            let r = crate::clipboard::wait_read(sent, Duration::from_millis(1500));
-            let got = reader.join().unwrap();
-            println!("   provider asked {} times", crate::clipboard::PROVIDE_CALLS.load(std::sync::atomic::Ordering::Relaxed));
-            let got = got?;
-            println!("1. read after {:?}, text matches: {}", r.map(|r| r.at - sent), got == text);
-            if r.is_none() || got != text {
-                return Err("lazy provider read not observed".into());
-            }
-
-            // 2. Nobody reads: unconfirmed after the timeout.
-            let seq = crate::clipboard::set_text_deferred(text)?.ok_or("no provider")?;
-            std::thread::sleep(Duration::from_millis(60));
-            crate::clipboard::arm();
-            let t = Instant::now();
-            let r = crate::clipboard::wait_read(t, Duration::from_millis(1500));
-            println!("2. no reader: {:?} after {:?}", r.map(|r| r.at - t), t.elapsed());
-            if r.is_some() {
-                return Err("read reported without a reader".into());
-            }
-            // 3. A late reader still gets the text.
-            let late = read_foreign()?;
-            println!("3. late read text matches: {}", late == text);
-            let seq = crate::clipboard::sequence().max(seq);
-            let ok = crate::clipboard::restore(saved, seq)?;
-            println!("restored: {ok}");
-            Ok(())
+            let r = clipboard_steps();
+            let restored = crate::clipboard::restore(saved, crate::clipboard::sequence());
+            println!("restored: {restored:?}");
+            r.and(restored.map(|_| ()))
         })();
         *out.lock().unwrap() = Some(r);
         on_main(|| {
@@ -291,6 +240,71 @@ pub fn clipboard_test() -> Result<(), String> {
     let app = app();
     let _: () = unsafe { msg_send![&app, run] };
     result.lock().unwrap().take().unwrap_or_else(|| Err("test did not finish".into()))
+}
+
+/// The pasteboard text as another process sees it. pbpaste waits for the
+/// provider; never let it hang the test.
+fn read_foreign() -> Result<String, String> {
+    use std::time::Duration;
+    // Without a UTF-8 locale pbpaste writes MacRoman and drops what it
+    // cannot encode (the emoji), so the text would never match.
+    let mut child = std::process::Command::new("/usr/bin/pbpaste")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let t = Instant::now();
+    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        if t.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let calls = crate::clipboard::PROVIDE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            return Err(format!("pbpaste got no answer in 5 s (provider asked {calls} times)"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let o = child.wait_with_output().map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+fn clipboard_steps() -> Result<(), String> {
+    use std::time::Duration;
+    // 1. A reader 80 ms after "⌘V": confirmed, with the right text.
+    let text = "chatty clipboard test äöü 👍";
+    crate::clipboard::set_text_deferred(text)?.ok_or("no provider")?;
+    std::thread::sleep(Duration::from_millis(60));
+    println!("   refused before arm: {:?}", crate::clipboard::arm());
+    let sent = Instant::now();
+    let reader = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(80));
+        read_foreign()
+    });
+    let r = crate::clipboard::wait_read(sent, Duration::from_millis(1500));
+    let got = reader.join().unwrap();
+    println!("   provider asked {} times", crate::clipboard::PROVIDE_CALLS.load(std::sync::atomic::Ordering::Relaxed));
+    let got = got?;
+    println!("1. read after {:?}, text matches: {}", r.map(|r| r.at - sent), got == text);
+    if r.is_none() || got != text {
+        return Err(format!("lazy provider read not observed (got {got:?})"));
+    }
+
+    // 2. Nobody reads: unconfirmed after the timeout.
+    crate::clipboard::set_text_deferred(text)?.ok_or("no provider")?;
+    std::thread::sleep(Duration::from_millis(60));
+    crate::clipboard::arm();
+    let t = Instant::now();
+    let r = crate::clipboard::wait_read(t, Duration::from_millis(1500));
+    println!("2. no reader: {:?} after {:?}", r.map(|r| r.at - t), t.elapsed());
+    if r.is_some() {
+        return Err("read reported without a reader".into());
+    }
+    // 3. A late reader still gets the text.
+    let late = read_foreign()?;
+    println!("3. late read text matches: {}", late == text);
+    if late != text {
+        return Err(format!("late read got {late:?}"));
+    }
+    Ok(())
 }
 
 /// Wakes `-[NSApplication run]` so a pending `stop:` returns.
