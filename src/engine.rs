@@ -849,7 +849,13 @@ impl Worker {
         let run = RunOptions { language: spec.language_arg(&cfg.language), ..Default::default() };
         warm_up(&mut session, spec, &run);
         let load_ms = ms(t0.elapsed());
-        log::info!("model {} loaded on {} in {:.0} ms (incl. warm-up)", spec.id, backend_name, load_ms);
+        log::info!(
+            "model {} loaded on {} in {:.0} ms (incl. warm-up), vocabulary {}",
+            spec.id,
+            backend_name,
+            load_ms,
+            if vocabulary { "supported" } else { "not supported" }
+        );
         self.pending_load_ms = Some(load_ms);
         let loaded_info = (spec.id.to_string(), backend_name.clone());
         crate::status::update(|s| s.loaded = Some(loaded_info));
@@ -901,9 +907,12 @@ impl Worker {
         let spec = loaded.spec;
         rec.model = spec.id.to_string();
         rec.backend = loaded.backend.clone();
-        // Vocabulary boosting works on offline runs only (the streaming API
-        // ignores it with a warning).
-        let vocabulary = if loaded.vocabulary && !spec.is_streaming() {
+        // Low-load mode runs the streaming decoder; everything else runs
+        // full-context passes, including streaming-capable models.
+        let stream = spec.is_streaming() && cfg.decode == "stream";
+        // Vocabulary boosting works on full-context runs only (the streaming
+        // API ignores it with a warning).
+        let vocabulary = if loaded.vocabulary && !stream {
             cfg.custom_words.iter().map(|w| w.word.clone()).collect()
         } else {
             Vec::new()
@@ -915,7 +924,7 @@ impl Worker {
             s
         });
         let parts = Parts { rx, capture, audio, vad: vad_session, pump: &mut pump, deferred, cfg: &cfg };
-        let outcome = if spec.is_streaming() && cfg.decode == "stream" {
+        let outcome = if stream {
             loaded.session.clear_cancel_token();
             record_streaming(&mut loaded.session, spec, &run, parts)
         } else {
