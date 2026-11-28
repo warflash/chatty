@@ -230,6 +230,15 @@ unsafe extern "C" {
     pub fn CGImageRelease(i: CGImageRef);
     pub fn CGContextDrawImage(c: CGContextRef, r: CGRect, image: CGImageRef);
     pub fn CGImageCreateWithImageInRect(image: CGImageRef, r: CGRect) -> CGImageRef;
+    pub fn CGDataProviderCreateWithData(
+        info: *mut c_void,
+        data: *const c_void,
+        size: usize,
+        release: Option<unsafe extern "C" fn(*mut c_void, *const c_void, usize)>,
+    ) -> *mut c_void;
+    pub fn CGDataProviderRelease(p: *mut c_void);
+    /// `intent`: kCGRenderingIntentDefault = 0.
+    pub fn CGImageCreateWithPNGDataProvider(source: *mut c_void, decode: *const f64, interpolate: bool, intent: i32) -> CGImageRef;
 
     pub fn CGContextSaveGState(c: CGContextRef);
     pub fn CGContextRestoreGState(c: CGContextRef);

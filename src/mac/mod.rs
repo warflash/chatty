@@ -11,7 +11,7 @@ use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 use objc2_foundation::NSString;
 
-use crate::{config, engine, logi, overlay, tray, ui};
+use crate::{config, engine, logi, overlay, tray, ui, update};
 
 // ---------------------------------------------------------------- dispatch --
 
@@ -179,8 +179,8 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
 }
 
 /// Creates the menu bar item, overlay and window support, then runs AppKit
-/// on the main thread until Quit.
-pub fn run(cfg: config::Shared, engine: engine::Handle, t0: Instant) {
+/// on the main thread until Quit. `updated`: started by an update.
+pub fn run(cfg: config::Shared, engine: engine::Handle, updated: bool, t0: Instant) {
     objc2::rc::autoreleasepool(|_| {
         let app = app();
         set_regular(false);
@@ -194,6 +194,10 @@ pub fn run(cfg: config::Shared, engine: engine::Handle, t0: Instant) {
         ui::init(cfg.clone(), Some(engine.clone()));
         tray::create(cfg.clone());
         engine.send(engine::Cmd::Warm);
+        update::start(cfg.clone());
+        if updated {
+            overlay::notice(&format!("Updated to {}", env!("CARGO_PKG_VERSION")));
+        }
         log::info!("ready in {:?}", t0.elapsed());
     });
     let app = app();

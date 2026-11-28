@@ -133,7 +133,7 @@ fn draw() {
         }
         a.gfx.as_ref()?;
         let actions = frame(a, w as f32, h as f32, dpi);
-        let image = a.gfx.as_ref().map(|g| g.image()).unwrap_or(std::ptr::null_mut());
+        let image = a.gfx.as_ref().map(|g| g.snapshot()).unwrap_or(std::ptr::null_mut());
         Some((actions, a.animating, a.mem.hand, a.mem.ibeam, image))
     })
     .flatten();
@@ -240,6 +240,8 @@ fn vk(code: u16) -> Option<u16> {
         117 => 0x2E,      // forward delete
         123 => 0x25,      // left
         124 => 0x27,      // right
+        126 => 0x26,      // up
+        125 => 0x28,      // down
         115 => 0x24,      // home
         119 => 0x23,      // end
         36 | 76 => 0x0D,  // return, keypad enter

@@ -2,23 +2,27 @@
 
 use std::time::Instant;
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG, TranslateMessage};
 use windows::core::w;
 
-use crate::{clipboard, config, engine, logi, overlay, tray, ui};
+use crate::{clipboard, config, engine, logi, overlay, tray, ui, update};
 
 /// False when another chatty already runs. Also opts into per-monitor DPI.
 pub fn single_instance() -> bool {
     unsafe {
-        let _mutex = CreateMutexW(None, true, w!("Local\\chatty-single-instance"));
+        let mutex = CreateMutexW(None, true, w!("Local\\chatty-single-instance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            // Closed so a caller that retries (after an update) can get it.
+            if let Ok(h) = mutex {
+                let _ = CloseHandle(h);
+            }
             return false;
         }
-        std::mem::forget(_mutex);
+        std::mem::forget(mutex);
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     true
@@ -51,13 +55,18 @@ pub fn set_autostart(enabled: bool) {
 }
 
 /// Creates the windows and runs the message loop on the main thread.
-pub fn run(cfg: config::Shared, engine: engine::Handle, t0: Instant) {
+/// `updated`: started by an update.
+pub fn run(cfg: config::Shared, engine: engine::Handle, updated: bool, t0: Instant) {
     let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }.map(|h| HINSTANCE(h.0)).unwrap_or_default();
     overlay::create(instance);
     ui::init(cfg.clone(), Some(engine.clone()));
     let main_hwnd = tray::create(instance, tray::Actions { cfg: cfg.clone() });
     clipboard::OWNER.store(main_hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
     engine.send(engine::Cmd::Warm);
+    update::start(cfg.clone());
+    if updated {
+        overlay::notice(&format!("Updated to {}", env!("CARGO_PKG_VERSION")));
+    }
     log::info!("ready in {:?}", t0.elapsed());
 
     unsafe {

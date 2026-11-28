@@ -52,7 +52,7 @@ engine ──── model, VAD, cleanup LLM; drains ring every 20 ms, streams or
      │    WASAPI callback ──rtrb──▶ engine
      ├─ download threads (on demand)
      └─ stats writer thread ── SQLite
-main thread ─ message loop: tray icon + menu, overlay window, clipboard owner
+main thread ─ message loop: tray icon + flyout, overlay window, clipboard owner
    also the statistics window (created on first open, hidden on close);
    its report is computed on a short-lived thread
 config watcher ─ FindFirstChangeNotification, reloads config.toml
@@ -123,9 +123,44 @@ src/stats.rs        schema, writer, report queries
 src/stats_ui.rs     statistics window (GDI)
 src/sqlite.rs       winsqlite3 FFI
 src/overlay.rs      click-through overlay
-src/tray.rs         tray icon and menu
+src/tray.rs         tray icon
+src/ui/flyout.rs    tray flyout: last transcript, quick settings
+src/update.rs       update check and self-update from GitHub releases
 src/clipboard.rs, input.rs, config.rs, paths.rs, logger.rs, wav.rs, bench.rs
 ```
+
+## Releases and updates
+
+To release: bump `version` in Cargo.toml, commit, tag `vX.Y.Z` and push
+the tag. CI checks that the tag matches Cargo.toml, then publishes a
+GitHub release with `chatty-X.Y.Z-windows-x64.zip` and its `.sha256`. A tag
+with a suffix (`v0.3.0-beta.1`) becomes a pre-release, which only the beta
+channel sees.
+
+The app (`update_channel`: stable, beta or off) asks the GitHub API at
+startup and every six hours. A newer release puts an "Update to X.Y.Z"
+button in the sidebar. Installing downloads the zip to
+`%LOCALAPPDATA%\chatty\update`, checks the SHA-256, unpacks it with
+Windows' `tar.exe` and copies it over the install folder. Files in use
+(chatty.exe, the DLLs) are renamed to `*.old` first, which Windows allows
+while they run; a failed copy puts everything back. The new exe starts
+with `CHATTY_UPDATED_FROM` set, waits up to 30 s for the old process to
+release the single-instance mutex, and deletes the `*.old` files. Config
+and data live outside the install folder and are untouched.
+
+On macOS the updater looks for `chatty-X.Y.Z-macos-arm64.zip` (published
+by the fork that carries the macOS port, fantasyflip/chatty), unpacks it
+with `ditto` into `~/Library/Application Support/chatty/update` and
+replaces the whole bundle: the running `chatty.app` is renamed to
+`chatty.app.old` and the new one moved into its place (put back on
+failure). The new executable is started directly (not through `open`) so
+it sees `CHATTY_UPDATED_FROM` and waits for the old process's lock file;
+it then deletes `chatty.app.old`. Builds not running from a `chatty.app`
+don't update. The bundle is ad-hoc signed, so macOS may ask for
+Accessibility again after an update.
+
+Debug builds and builds run from a `target` folder never update.
+`CHATTY_UPDATE_FEED=<url>` replaces the releases API URL for testing.
 
 ## Simplifications (noted, deliberate)
 

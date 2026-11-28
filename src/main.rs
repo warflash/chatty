@@ -31,6 +31,7 @@ mod text;
 #[cfg_attr(target_os = "macos", path = "mac/tray.rs")]
 mod tray;
 mod ui;
+mod update;
 mod wav;
 #[cfg(windows)]
 mod win;
@@ -128,12 +129,21 @@ fn main() {
         std::process::exit(code);
     }
 
-    if !os::single_instance() {
-        log::info!("already running");
-        return;
+    // Started by an update: the old process is still shutting down.
+    let updated_from = std::env::var(update::RESTART_ENV).ok();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !os::single_instance() {
+        if updated_from.is_none() || Instant::now() > deadline {
+            log::info!("already running");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     let t0 = Instant::now();
     log::info!("chatty {} starting ({})", env!("CARGO_PKG_VERSION"), paths::exe_dir().display());
+    if let Some(v) = &updated_from {
+        log::info!("updated from {v}");
+    }
 
     let cfg_path = config::path();
     let cfg = config::Shared::new(cfg_path.clone(), config::load_or_create(&cfg_path));
@@ -183,10 +193,13 @@ fn main() {
             if old.mouse_button != new.mouse_button {
                 logi::set_enabled(new.mouse_button);
             }
+            if old.update_channel != new.update_channel {
+                update::check_now();
+            }
             engine.send(engine::Cmd::Config(std::sync::Arc::new(new.clone())));
             tray::set_tooltip("");
         });
     }
     os::set_autostart(cfg.get().autostart);
-    os::run(cfg, engine, t0);
+    os::run(cfg, engine, updated_from.is_some(), t0);
 }

@@ -251,7 +251,7 @@ fn render() {
         g.clear(Color(0.0, 0.0, 0.0, 0.0));
         let buttons = draw(g, &frame, &geo);
         g.end();
-        let image = g.image();
+        let image = g.snapshot();
         anim.scale = scale;
 
         // Fade and slide.

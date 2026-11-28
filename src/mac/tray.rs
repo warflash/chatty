@@ -23,7 +23,8 @@ const ID_FOLDER: isize = 1304;
 const ID_QUIT: isize = 1305;
 const ID_OVERLAY: isize = 1306;
 const ID_OPEN: isize = 1307;
-const ID_SETTINGS: isize = 1308;
+const ID_SETTINGS: isize = 1308;const ID_COPY_LAST: isize = 1310;
+const ID_UPDATE: isize = 1311;
 
 const LANGUAGES: &[(&str, &str)] = &[("auto", "Auto-detect"), ("en", "English"), ("de", "German")];
 
@@ -211,6 +212,21 @@ fn rebuild(menu: &AnyObject, target: &AnyObject) {
     add(menu, target, &format!("chatty {}", env!("CARGO_PKG_VERSION")), 0, false, false);
     separator(menu);
 
+    // The last transcript; clicking copies it (the Windows flyout's card).
+    match crate::status::get().last {
+        Some((text, at_ms)) => {
+            add(menu, target, &format!("Last transcript · {}", ago(at_ms, now_ms())), 0, false, false);
+            let item = add(menu, target, &preview(&text, 48), ID_COPY_LAST, false, true);
+            unsafe {
+                let _: () = msg_send![&*item, setToolTip: &*nsstring("Copy to the clipboard")];
+            }
+        }
+        None => {
+            add(menu, target, "No transcript yet", 0, false, false);
+        }
+    }
+    separator(menu);
+
     let models_menu = new_menu();
     for (i, m) in models::ASR.iter().enumerate() {
         let label = if m.asset.is_ready() { m.name.to_string() } else { format!("{}  (download {} MB)", m.name, m.asset.size >> 20) };
@@ -238,6 +254,17 @@ fn rebuild(menu: &AnyObject, target: &AnyObject) {
     add(menu, target, "Open config.toml", ID_CONFIG, false, true);
     add(menu, target, "Open log", ID_LOG, false, true);
     add(menu, target, "Open data folder", ID_FOLDER, false, true);
+    match crate::update::state() {
+        crate::update::State::Available(r) | crate::update::State::Failed(r, _) => {
+            separator(menu);
+            add(menu, target, &format!("Update to {}", r.version), ID_UPDATE, false, true);
+        }
+        crate::update::State::Installing(r, f) => {
+            separator(menu);
+            add(menu, target, &format!("Installing {}  {:.0}%", r.version, f * 100.0), 0, false, false);
+        }
+        _ => {}
+    }
     if !crate::mac::accessibility_trusted(false) {
         separator(menu);
         add(menu, target, "Grant Accessibility access…", ID_ACCESS, false, true);
@@ -264,6 +291,15 @@ fn handle(id: isize) {
                 .spawn();
         }
         ID_QUIT => crate::mac::quit(),
+        ID_COPY_LAST => {
+            if let Some((text, _)) = crate::status::get().last {
+                match crate::clipboard::set_text(&text) {
+                    Ok(_) => crate::overlay::notice("Copied"),
+                    Err(e) => log::warn!("copy: {e}"),
+                }
+            }
+        }
+        ID_UPDATE => crate::update::install(),
         ID_CLEANUP_TOGGLE => cfg.set(&[("cleanup.enabled", (!cfg.get().cleanup.enabled).into())]),
         ID_OVERLAY => cfg.set(&[("overlay", (!cfg.get().overlay).into())]),
         i if (ID_MODEL..ID_MODEL + models::ASR.len() as isize).contains(&i) => {
@@ -323,4 +359,52 @@ pub fn create(cfg: config::Shared) {
         ITEM.with(|i| *i.borrow_mut() = Some((status, target)));
     }
     update();
+}
+
+/// One line of `text`: whitespace collapsed, cut at a word after `max` chars.
+fn preview(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", cut.trim_end_matches([',', '.', ';', ':']))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+fn ago(at_ms: i64, now_ms: i64) -> String {
+    let s = (now_ms - at_ms).max(0) / 1000;
+    match s {
+        0..45 => "just now".into(),
+        45..90 => "1 min ago".into(),
+        90..3600 => format!("{} min ago", (s + 30) / 60),
+        3600..86_400 => format!("{} h ago", s / 3600),
+        86_400..172_800 => "yesterday".into(),
+        _ => format!("{} days ago", s / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_is_one_short_line() {
+        assert_eq!(preview("  hello\n\n world ", 48), "hello world");
+        assert_eq!(preview("one two three four", 10), "one two…");
+        assert_eq!(preview("", 10), "");
+    }
+
+    #[test]
+    fn ago_buckets() {
+        let m = 60_000;
+        assert_eq!(ago(0, 10_000), "just now");
+        assert_eq!(ago(0, 7 * m), "7 min ago");
+        assert_eq!(ago(0, 3 * 60 * m), "3 h ago");
+        assert_eq!(ago(10, 0), "just now");
+    }
 }

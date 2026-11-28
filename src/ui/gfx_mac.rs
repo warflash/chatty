@@ -124,6 +124,9 @@ pub struct Gfx {
     glows: std::cell::RefCell<HashMap<([u32; 4], usize), Cf>>,
     /// Card shadows as nine-slice images, keyed by radius, strength, scale.
     shadows: std::cell::RefCell<HashMap<[u32; 3], Option<Slices>>>,
+    /// Decoded embedded PNGs keyed by data address; None when decoding
+    /// failed, so it is not retried every frame.
+    pngs: HashMap<usize, Option<Cf>>,
 }
 
 /// A shadow rendered once around a small card: eight pieces (corners and
@@ -249,6 +252,7 @@ impl Gfx {
             strips: Default::default(),
             glows: Default::default(),
             shadows: Default::default(),
+            pngs: HashMap::new(),
             ns_ctx: None,
         };
         g.resize(w_px, h_px);
@@ -289,7 +293,7 @@ impl Gfx {
     }
 
     /// The current bitmap as an image (+1; release with CGImageRelease).
-    pub fn image(&self) -> CGImageRef {
+    pub fn snapshot(&self) -> CGImageRef {
         unsafe { CGBitmapContextCreateImage(self.ctx) }
     }
 
@@ -308,7 +312,7 @@ impl Gfx {
 
     pub fn write_png(&self, path: &std::path::Path) -> Result<(), String> {
         unsafe {
-            let img = self.image();
+            let img = self.snapshot();
             if img.is_null() {
                 return Err("no image".into());
             }
@@ -350,6 +354,33 @@ impl Gfx {
         }
         unsafe { CGContextRestoreGState(self.ctx) };
         true
+    }
+
+    /// Draws an embedded PNG into `r`, resampled with high quality.
+    pub fn image(&mut self, png: &'static [u8], r: Rect) {
+        let img = self.pngs.entry(png.as_ptr() as usize).or_insert_with(|| unsafe {
+            let provider = CGDataProviderCreateWithData(std::ptr::null_mut(), png.as_ptr().cast(), png.len(), None);
+            if provider.is_null() {
+                return None;
+            }
+            let img = CGImageCreateWithPNGDataProvider(provider, std::ptr::null(), true, 0);
+            CGDataProviderRelease(provider);
+            let img = Cf::new(img as CFTypeRef);
+            if img.is_none() {
+                log::warn!("image decode failed");
+            }
+            img
+        });
+        let Some(img) = img else { return };
+        unsafe {
+            CGContextSaveGState(self.ctx);
+            CGContextSetInterpolationQuality(self.ctx, 3);
+            // The context is flipped (y down); images draw bottom-up.
+            CGContextTranslateCTM(self.ctx, 0.0, (r.y + r.h) as f64);
+            CGContextScaleCTM(self.ctx, 1.0, -1.0);
+            CGContextDrawImage(self.ctx, cg(Rect::new(r.x, 0.0, r.w, r.h)), img.as_ptr() as CGImageRef);
+            CGContextRestoreGState(self.ctx);
+        }
     }
 
     /// Moves the origin (DIPs) for the rest of the frame.

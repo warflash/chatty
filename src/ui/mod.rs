@@ -7,6 +7,8 @@
 //! frame, outside the window state borrow (Win32 and AppKit calls may
 //! re-enter the window code).
 
+#[cfg(windows)]
+pub mod flyout;
 #[cfg_attr(target_os = "macos", path = "gfx_mac.rs")]
 pub mod gfx;
 mod geom;
@@ -136,6 +138,21 @@ struct Popup {
     selected: usize,
     /// Scroll offset for long lists (DIPs); None until first drawn.
     scroll: Option<f32>,
+    /// Filter field for searchable lists.
+    search: Option<TextField>,
+    /// Keyboard highlight, an index into the filtered list.
+    hot: usize,
+}
+
+/// Option indices whose text contains every word of `query`, ignoring case.
+fn filter_options(options: &[String], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    (0..options.len())
+        .filter(|&i| {
+            let o = options[i].to_lowercase();
+            words.iter().all(|w| o.contains(w.as_str()))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -160,6 +177,9 @@ pub enum Action {
     DeleteModel(&'static crate::models::Asset),
     ReloadStats,
     ListDevices,
+    /// Download and install the available release.
+    Update,
+    CheckUpdates,
 }
 
 pub fn id(s: &str) -> u64 {
@@ -326,8 +346,9 @@ impl Ui<'_> {
         out
     }
 
-    /// Dropdown; the list opens over everything else.
-    pub fn select(&mut self, key: &str, options: &[String], selected: usize, r: Rect) -> Option<usize> {
+    /// Dropdown; the list opens over everything else. With `searchable` the list
+    /// opens with a filter field: typing narrows it, arrows and Enter pick.
+    pub fn select(&mut self, key: &str, options: &[String], selected: usize, searchable: bool, r: Rect) -> Option<usize> {
         let k = id(key);
         if let Some((cid, i)) = self.mem.chosen {
             if cid == k {
@@ -344,7 +365,15 @@ impl Ui<'_> {
         self.icon(icon::CHEVRON_DOWN, Rect::new(r.right() - 32.0, r.y, 24.0, r.h), 10.0, theme::TEXT2);
         if clicked {
             // The popup is drawn in screen coordinates at the end of the frame.
-            self.mem.popup = Some(Popup { id: k, anchor: r, options: options.to_vec(), selected, scroll: None });
+            self.mem.popup = Some(Popup {
+                id: k,
+                anchor: r,
+                options: options.to_vec(),
+                selected,
+                scroll: None,
+                search: searchable.then(TextField::default),
+                hot: selected,
+            });
         }
         None
     }
@@ -681,14 +710,15 @@ fn frame(app: &mut App, w: f32, h: f32, dpi: f32) -> Vec<Action> {
     actions
 }
 
+const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon-128.png");
+
 fn sidebar(ui: &mut Ui, current: Page, h: f32, nav_to: &mut Option<Page>) {
     let status = crate::status::get();
     ui.g.fill(Rect::new(0.0, 0.0, SIDEBAR_W, h), 0.0, theme::SIDEBAR);
-    // Brand: gradient tile with the mic glyph.
+    // Brand: the app icon (assets/icon-128.png, same art as chatty.ico).
     let logo = Rect::new(20.0, 22.0, 34.0, 34.0);
     ui.g.glow(logo.x + 17.0, logo.y + 17.0, 40.0, theme::ACCENT.alpha(0.18));
-    ui.g.gradient(logo, 10.0, theme::ACCENT, theme::ACCENT2);
-    ui.icon(icon::MIC, logo, 16.0, Color::white(1.0));
+    ui.g.image(APP_ICON_PNG, logo);
     ui.g.label("chatty", Font::display(19.0), Rect::new(66.0, 20.0, 150.0, 24.0), theme::TEXT, Align::Left);
     let (dot, word) = phase_style(status.phase);
     ui.g.circle(70.0, 49.0, 3.5, dot);
@@ -717,6 +747,8 @@ fn sidebar(ui: &mut Ui, current: Page, h: f32, nav_to: &mut Option<Page>) {
         y += 42.0;
     }
 
+    update_button(ui, Rect::new(12.0, h - 154.0, SIDEBAR_W - 24.0, 38.0));
+
     // Footer card: model, backend, microphone.
     let cfg = ctx().cfg.get();
     let model = crate::models::asr(&cfg.model).map_or(cfg.model.as_str(), |m| m.id);
@@ -735,6 +767,31 @@ fn sidebar(ui: &mut Ui, current: Page, h: f32, nav_to: &mut Option<Page>) {
     ui.g.label(&line, Font::text(11.5), Rect::new(card.x + 30.0, card.y + 54.0, card.w - 44.0, 26.0), theme::TEXT3, Align::Left);
 }
 
+/// Above the footer card while a release is available or installing.
+fn update_button(ui: &mut Ui, r: Rect) {
+    use crate::update::State;
+    match crate::update::state() {
+        State::Available(rel) => {
+            if ui.button("update", &format!("Update to {}", rel.version), Some(icon::DOWNLOAD), Kind::Primary, r) {
+                ui.actions.push(Action::Update);
+            }
+        }
+        State::Installing(rel, f) => {
+            ui.g.fill(r, 8.0, theme::CONTROL);
+            ui.g.stroke(r, 8.0, Color::white(0.07), 1.0);
+            let text = if f < 1.0 { format!("Downloading {}  {:.0}%", rel.version, f * 100.0) } else { format!("Installing {}", rel.version) };
+            ui.g.label(&text, Font::semibold(12.5), Rect::new(r.x + 14.0, r.y, r.w - 28.0, r.h - 4.0), theme::TEXT, Align::Left);
+            ui.progress(Rect::new(r.x + 14.0, r.bottom() - 9.0, r.w - 28.0, 3.0), f, theme::ACCENT);
+        }
+        State::Failed(rel, _) => {
+            if ui.button("update", &format!("Retry update to {}", rel.version), Some(icon::REFRESH), Kind::Secondary, r) {
+                ui.actions.push(Action::Update);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn phase_style(p: crate::status::Phase) -> (Color, &'static str) {
     use crate::status::Phase::*;
     match p {
@@ -747,59 +804,129 @@ pub fn phase_style(p: crate::status::Phase) -> (Color, &'static str) {
 }
 
 fn popup(ui: &mut Ui, w: f32, h: f32) {
-    let Some(p) = ui.mem.popup.clone() else {
+    let Some(mut p) = ui.mem.popup.clone() else {
         ui.mem.popup_rect = None;
         return;
     };
     let row = 34.0;
-    let ph = (p.options.len() as f32 * row + 8.0).min(h - 40.0).min(420.0);
+    let head = if p.search.is_some() { 44.0 } else { 0.0 };
+    // Sized for the full list so the popup keeps its size while filtering.
+    let ph = (p.options.len() as f32 * row + 8.0 + head).min(h - 40.0).min(420.0 + head);
     let mut y = p.anchor.bottom() + 4.0;
     if y + ph > h - 8.0 {
         y = (p.anchor.y - ph - 4.0).max(8.0);
     }
-    let r = Rect::new(p.anchor.x, y, p.anchor.w.max(220.0).min(w - p.anchor.x - 8.0), ph);
+    // Wide enough for the longest option (short lists only: this runs every
+    // frame), moved left when the right edge is near.
+    let mut pw = p.anchor.w.max(220.0);
+    if p.options.len() <= 40 {
+        for o in &p.options {
+            pw = pw.max(ui.g.measure(o, Font::text(13.0), 1000.0, false).0 + 40.0);
+        }
+    }
+    let pw = pw.min(w - 16.0);
+    let r = Rect::new(p.anchor.x.min(w - pw - 8.0).max(8.0), y, pw, ph);
+    let outside = ui.input.pressed && !r.contains(ui.input.mouse);
     ui.g.shadow(r, 10.0, 0.22);
     ui.g.fill(r, 10.0, Color::rgb(32, 32, 38));
     ui.g.stroke(r, 10.0, Color::white(0.10), 1.0);
     ui.mem.popup_rect = Some(r);
-    // Long lists scroll; they open with the selection in view.
-    let max_scroll = (p.options.len() as f32 * row + 8.0 - ph).max(0.0);
-    let scroll = p.scroll.unwrap_or((p.selected as f32 * row - ph / 2.0 + row).max(0.0)).clamp(0.0, max_scroll);
-    if let Some(m) = ui.mem.popup.as_mut() {
-        m.scroll = Some(scroll);
-    }
-    ui.g.push_clip(r.inset(1.0, 4.0));
+    let list = Rect::new(r.x, r.y + head, r.w, r.h - head);
+
     let mut chosen = None;
-    for (i, o) in p.options.iter().enumerate() {
-        let rr = Rect::new(r.x + 4.0, r.y + 4.0 + i as f32 * row - scroll, r.w - 8.0, row - 2.0);
-        if rr.bottom() < r.y || rr.y > r.bottom() {
+    let mut close = outside;
+    let shown: Vec<usize> = match p.search.as_mut() {
+        None => (0..p.options.len()).collect(),
+        Some(field) => {
+            let before = field.text.clone();
+            let n = filter_options(&p.options, &field.text).len();
+            let mut moved = false;
+            for &k in &ui.input.keys {
+                match k {
+                    0x1B => close = true,
+                    0x26 => p.hot = p.hot.saturating_sub(1),
+                    0x28 => p.hot = (p.hot + 1).min(n.saturating_sub(1)),
+                    _ => continue,
+                }
+                moved = true;
+            }
+            if close {
+                Vec::new()
+            } else {
+                // The filter field owns the keyboard while the list is open.
+                ui.mem.focus = id("popup/search");
+                ui.focus_claimed = true;
+                let submit = ui.text_input("popup/search", field, "Search", Some(icon::SEARCH), Rect::new(r.x + 6.0, r.y + 6.0, r.w - 12.0, 32.0));
+                if field.text != before {
+                    p.hot = 0;
+                    p.scroll = Some(0.0);
+                }
+                let shown = filter_options(&p.options, &field.text);
+                p.hot = p.hot.min(shown.len().saturating_sub(1));
+                if submit && !shown.is_empty() {
+                    chosen = Some(shown[p.hot]);
+                }
+                if moved {
+                    // Keep the keyboard highlight in view.
+                    let view = list.h - 8.0;
+                    let top = p.hot as f32 * row;
+                    let s = p.scroll.unwrap_or(0.0);
+                    p.scroll = Some(if top < s { top } else if top + row > s + view { top + row - view } else { s });
+                }
+                shown
+            }
+        }
+    };
+    let searchable = p.search.is_some();
+
+    // Long lists scroll; they open with the selection in view.
+    let max_scroll = (shown.len() as f32 * row + 8.0 - list.h).max(0.0);
+    let scroll = p.scroll.unwrap_or((p.selected as f32 * row - list.h / 2.0 + row).max(0.0)).clamp(0.0, max_scroll);
+    p.scroll = Some(scroll);
+    if searchable {
+        ui.g.line(r.x + 1.0, list.y + 0.5, r.right() - 1.0, list.y + 0.5, Color::white(0.07), 1.0);
+        if shown.is_empty() {
+            ui.g.label("No match", Font::text(13.0), Rect::new(list.x + 18.0, list.y + 4.0, list.w - 24.0, row), theme::TEXT3, Align::Left);
+        }
+    }
+    ui.g.push_clip(list.inset(1.0, 4.0));
+    for (pos, &i) in shown.iter().enumerate() {
+        let rr = Rect::new(list.x + 4.0, list.y + 4.0 + pos as f32 * row - scroll, list.w - 8.0, row - 2.0);
+        if rr.bottom() < list.y || rr.y > list.bottom() {
             continue;
         }
         let (hover, _, clicked) = ui.interact(id(&format!("popup/{i}")), rr);
-        if hover || i == p.selected {
-            ui.g.fill(rr, 4.0, Color::white(if hover { 0.08 } else { 0.05 }));
+        let hot = searchable && pos == p.hot;
+        if hover || hot || i == p.selected {
+            ui.g.fill(rr, 4.0, Color::white(if hot { 0.09 } else if hover { 0.07 } else { 0.05 }));
         }
         if i == p.selected {
             ui.g.fill(Rect::new(rr.x, rr.y + 9.0, 3.0, rr.h - 18.0), 1.5, theme::ACCENT);
         }
-        ui.g.label(o, Font::text(13.0), Rect::new(rr.x + 14.0, rr.y, rr.w - 20.0, rr.h), theme::TEXT, Align::Left);
-        if clicked && r.contains(ui.input.mouse) {
+        ui.g.label(&p.options[i], Font::text(13.0), Rect::new(rr.x + 14.0, rr.y, rr.w - 20.0, rr.h), theme::TEXT, Align::Left);
+        if clicked && list.contains(ui.input.mouse) {
             chosen = Some(i);
         }
     }
     ui.g.pop_clip();
     if max_scroll > 0.0 {
-        let track = r.h - 16.0;
-        let thumb = (track * ph / (max_scroll + ph)).max(24.0);
-        let ty = r.y + 8.0 + (track - thumb) * (scroll / max_scroll);
+        let track = list.h - 16.0;
+        let thumb = (track * list.h / (max_scroll + list.h)).max(24.0);
+        let ty = list.y + 8.0 + (track - thumb) * (scroll / max_scroll);
         ui.g.fill(Rect::new(r.right() - 6.0, ty, 3.0, thumb), 1.5, Color::white(0.18));
     }
     if let Some(i) = chosen {
         ui.mem.chosen = Some((p.id, i));
         ui.mem.popup = None;
+        ui.mem.focus = 0;
         ui.animate = true; // one more frame delivers the choice
-    } else if ui.input.pressed && !r.contains(ui.input.mouse) {
+    } else if close {
         ui.mem.popup = None;
+        if !outside {
+            ui.mem.focus = 0; // Escape
+        }
+    } else {
+        ui.mem.popup = Some(p);
     }
 }
 
@@ -810,6 +937,8 @@ fn run_actions(actions: Vec<Action>) {
                 let refs: Vec<(&str, toml_edit::Value)> = values.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
                 ctx().cfg.set(&refs);
             }
+            Action::Update => crate::update::install(),
+            Action::CheckUpdates => crate::update::check_now(),
             Action::Open(p) => host::open_path(&p),
             Action::Copy(t) => {
                 if let Err(e) = crate::clipboard::set_text(&t) {
@@ -852,3 +981,16 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok().and_then(|mut a| a.as_mut().map(f)))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::filter_options;
+
+    #[test]
+    fn filter_matches_every_word_ignoring_case() {
+        let o: Vec<String> = ["System default", "Microphone (USB Audio)", "Headset Microphone (Jabra)"].map(String::from).to_vec();
+        assert_eq!(filter_options(&o, ""), vec![0, 1, 2]);
+        assert_eq!(filter_options(&o, "mic"), vec![1, 2]);
+        assert_eq!(filter_options(&o, "usb MIC"), vec![1]);
+        assert!(filter_options(&o, "bluetooth").is_empty());
+    }
+}

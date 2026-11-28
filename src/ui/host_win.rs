@@ -39,6 +39,7 @@ fn visible() -> bool {
 
 /// Live status changed (any thread).
 pub fn notify() {
+    super::flyout::notify();
     if let Some(h) = hwnd() {
         if visible() && !NOTIFY_PENDING.swap(true, Ordering::AcqRel) {
             unsafe {
@@ -98,7 +99,7 @@ fn frame_window(app: &mut App, hwnd: HWND) -> Vec<Action> {
     frame(app, rc.right as f32 / scale, rc.bottom as f32 / scale, dpi)
 }
 
-fn mouse_pos(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+pub(super) fn mouse_pos(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
     let x = (lparam.0 & 0xFFFF) as u16 as i16 as f32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as f32;
     let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
