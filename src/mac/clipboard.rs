@@ -137,22 +137,25 @@ pub static PROVIDE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 
 extern "C-unwind" fn provide(this: *mut AnyObject, _sel: Sel, _pb: *mut AnyObject, item: *mut AnyObject, ty: *mut AnyObject) {
     PROVIDE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let this: &AnyObject = unsafe { &*this };
-    let mut d = DEFERRED.lock().unwrap();
-    if d.owner != this as *const AnyObject as usize {
-        return;
-    }
-    let Some(text) = d.text.clone() else { return };
-    if !d.armed {
-        d.refused.push(0);
-        return;
-    }
+    // Decide under the lock, call AppKit without it: setting the data can
+    // re-enter the provider, and the engine thread waits on this lock.
+    let text = {
+        let mut d = DEFERRED.lock().unwrap();
+        if d.owner != this as usize {
+            return;
+        }
+        let Some(text) = d.text.clone() else { return };
+        if !d.armed {
+            d.refused.push(0);
+            return;
+        }
+        text
+    };
     if let (Some(item), Some(ty)) = (unsafe { item.as_ref() }, unsafe { ty.as_ref() }) {
         let s = nsstring(&text);
         let _: bool = unsafe { msg_send![item, setString: &*s, forType: ty] };
     }
-    d.read = Some(Read { at: Instant::now(), pid: 0 });
-    drop(d);
+    DEFERRED.lock().unwrap().read = Some(Read { at: Instant::now(), pid: 0 });
     READ.notify_all();
 }
 

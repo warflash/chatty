@@ -108,7 +108,6 @@ jobs:
           tail -50 ~/Library/Application\ Support/chatty/chatty.log || true
 
       - name: Clipboard check
-        continue-on-error: true
         timeout-minutes: 2
         run: ./target/release/chatty --clipboard-test
 
