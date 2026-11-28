@@ -132,7 +132,11 @@ thread_local! {
     static PROVIDER: RefCell<Option<Id>> = const { RefCell::new(None) };
 }
 
+/// How often AppKit asked the provider (diagnostics).
+pub static PROVIDE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 extern "C-unwind" fn provide(this: *mut AnyObject, _sel: Sel, _pb: *mut AnyObject, item: *mut AnyObject, ty: *mut AnyObject) {
+    PROVIDE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let this: &AnyObject = unsafe { &*this };
     let mut d = DEFERRED.lock().unwrap();
     if d.owner != this as *const AnyObject as usize {

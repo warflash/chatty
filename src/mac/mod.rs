@@ -216,12 +216,28 @@ pub fn quit() -> ! {
 pub fn clipboard_test() -> Result<(), String> {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    // As in the app: a menu bar (accessory) process.
+    set_regular(false);
     let result: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
     let out = result.clone();
     std::thread::spawn(move || {
         let r = (|| -> Result<(), String> {
+            // pbpaste waits for the provider; never let it hang the test.
             let read_foreign = || -> Result<String, String> {
-                let o = std::process::Command::new("/usr/bin/pbpaste").output().map_err(|e| e.to_string())?;
+                let mut child = std::process::Command::new("/usr/bin/pbpaste")
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                let t = Instant::now();
+                while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                    if t.elapsed() > Duration::from_secs(5) {
+                        let _ = child.kill();
+                        let calls = crate::clipboard::PROVIDE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+                        return Err(format!("pbpaste got no answer in 5 s (provider asked {calls} times)"));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let o = child.wait_with_output().map_err(|e| e.to_string())?;
                 Ok(String::from_utf8_lossy(&o.stdout).into_owned())
             };
             let saved = crate::clipboard::save()?;
@@ -238,7 +254,9 @@ pub fn clipboard_test() -> Result<(), String> {
                 read_foreign()
             });
             let r = crate::clipboard::wait_read(sent, Duration::from_millis(1500));
-            let got = reader.join().unwrap()?;
+            let got = reader.join().unwrap();
+            println!("   provider asked {} times", crate::clipboard::PROVIDE_CALLS.load(std::sync::atomic::Ordering::Relaxed));
+            let got = got?;
             println!("1. read after {:?}, text matches: {}", r.map(|r| r.at - sent), got == text);
             if r.is_none() || got != text {
                 return Err("lazy provider read not observed".into());
