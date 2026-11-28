@@ -536,7 +536,8 @@ impl Gfx {
             let base = Cf(CFAttributedStringCreate(std::ptr::null(), text.as_ptr(), attrs.as_ptr()));
             let n = utf16_len(s);
             match split {
-                Some((at, c2)) if (at as CFIndex) < n => {
+                // `split` is usize::MAX for "all in c1": compare unsigned.
+                Some((at, c2)) if at < n as usize => {
                     let m = CFAttributedStringCreateMutableCopy(std::ptr::null(), 0, base.as_ptr());
                     let col2 = Cf(CGColorCreateSRGB(c2.0 as f64, c2.1 as f64, c2.2 as f64, c2.3 as f64) as CFTypeRef);
                     let at = at as CFIndex;
