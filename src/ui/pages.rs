@@ -249,7 +249,7 @@ fn overview(ui: &mut Ui, c: &mut Col, st: &mut PageState, nav: &mut Option<Page>
     if recent.is_empty() {
         let r = c.take(64.0);
         ui.card(r);
-        ui.g.label("Nothing yet. Hold the button behind the scroll wheel and speak.", Font::text(13.0), r.inset(16.0, 0.0), theme::TEXT2, Align::Left);
+        ui.g.label("Nothing yet. Hold the trigger and speak.", Font::text(13.0), r.inset(16.0, 0.0), theme::TEXT2, Align::Left);
     }
     if !recent.is_empty() {
         // One card, rows separated by hairlines.
@@ -1043,7 +1043,7 @@ fn settings(ui: &mut Ui, c: &mut Col, st: &mut PageState) {
     if let Some(i) = ui.select("set/font", &labels, selected, r) {
         set(ui, "font", fonts[i].1.clone());
     }
-    toggle_row(ui, c, "Press Enter after pasting", "Sends the message right away", "auto_enter", cfg.auto_enter);
+    toggle_row(ui, c, crate::platform::AUTO_ENTER_LABEL, "Sends the message right away", "auto_enter", cfg.auto_enter);
     if !cfg.auto_enter {
         toggle_row(
             ui,

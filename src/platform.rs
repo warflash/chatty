@@ -10,6 +10,7 @@ mod imp {
     pub const PASTE_KEYS: &str = "Ctrl+V";
     pub const AUTOSTART_LABEL: &str = "Start with Windows";
     pub const FONTS_HINT: &str = r"Installed fonts, or .ttf files in %LOCALAPPDATA%\chatty\fonts";
+    pub const AUTO_ENTER_LABEL: &str = "Press Enter after pasting";
 }
 
 #[cfg(target_os = "macos")]
@@ -21,6 +22,7 @@ mod imp {
     pub const PASTE_KEYS: &str = "⌘V";
     pub const AUTOSTART_LABEL: &str = "Open at login";
     pub const FONTS_HINT: &str = "Installed fonts, or .ttf files in ~/Library/Application Support/chatty/fonts";
+    pub const AUTO_ENTER_LABEL: &str = "Press Return after pasting";
 }
 
 pub use imp::*;
@@ -31,10 +33,10 @@ pub fn trigger_hint(trigger: &str) -> &'static str {
         return "Hold Ctrl + Numpad / to dictate into any window. A short tap presses Enter; Escape cancels.";
     }
     match trigger {
-        "right_option" => "Hold the right Option key to dictate into any app. A short tap presses Enter; Escape cancels.",
-        "right_command" => "Hold the right Command key to dictate into any app. A short tap presses Enter; Escape cancels.",
-        "fn" => "Hold the fn (Globe) key to dictate into any app. A short tap presses Enter; Escape cancels.",
-        _ => "Hold Control + keypad / to dictate into any app. A short tap presses Enter; Escape cancels.",
+        "right_option" => "Hold the right Option key to dictate into any app. A short tap presses Return; Escape cancels.",
+        "right_command" => "Hold the right Command key to dictate into any app. A short tap presses Return; Escape cancels.",
+        "fn" => "Hold the fn (Globe) key to dictate into any app. A short tap presses Return; Escape cancels.",
+        _ => "Hold Control + keypad / to dictate into any app. A short tap presses Return; Escape cancels.",
     }
 }
 

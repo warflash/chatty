@@ -159,7 +159,7 @@ fn bench_cleanup(text: &str, id: Option<&str>) -> Result<(), String> {
     ensure(&spec.asset)?;
     let t = Instant::now();
     let mut c = crate::cleanup::Cleaner::load(spec, &cfg)?;
-    println!("{} loaded in {:.0} ms (incl. warm-up; total {:.0} ms with DLLs)", spec.id, c.load_ms, ms(t));
+    println!("{} loaded in {:.0} ms (incl. warm-up; total {:.0} ms with libraries)", spec.id, c.load_ms, ms(t));
     for i in 0..5 {
         let r = c.clean(text, Some("en"), &cfg);
         println!(
